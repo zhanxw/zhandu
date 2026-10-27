@@ -1,0 +1,32 @@
+[package]
+name = "zhandu"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Fast terminal disk usage explorer with group and user accounting"
+repository = "https://github.com/zhanxw/zhandu"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+rayon = "1.12"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ctrlc = "3"
+
+[target.'cfg(unix)'.dependencies]
+uzers = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Security_Authorization"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
