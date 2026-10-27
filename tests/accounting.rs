@@ -210,6 +210,27 @@ fn cli_json_has_reconciling_totals_and_filters() {
         .unwrap();
     let filtered: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(filtered["total"], report["total"]);
+    let group_name = uzers::get_group_by_gid(gid)
+        .unwrap()
+        .name()
+        .to_string_lossy()
+        .into_owned();
+    for group in [gid.to_string(), group_name, gid.wrapping_add(1).to_string()] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_zhandu"))
+            .args(["--json", "-g", &group])
+            .arg(temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let short: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if group == gid.wrapping_add(1).to_string() {
+            assert_eq!(short["total"]["inodes"], 0);
+            assert_eq!(short["total"]["allocated"], 0);
+        } else {
+            assert_eq!(short["total"], filtered["total"]);
+        }
+    }
+
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_zhandu"))
         .args(["--threads", "0", "--json"])
         .arg(temp.path())

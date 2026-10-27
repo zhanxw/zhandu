@@ -8,6 +8,10 @@ A fast, read-only disk usage explorer written in Rust for **Windows, Linux, and 
 
 Download and extract the archive for your platform, then run `zhandu` (`zhandu.exe` in Windows PowerShell). Release archives contain documentation, licenses, and an optimized executable. Verify downloads against the release’s `SHA256SUMS`.
 
+Install from crates.io with `cargo install zhandu --locked`.
+
+`-g GROUP` (or `--group GROUP`) counts only entries owned by that group, including matching files inside directories owned by other groups. It accepts group names or Unix GIDs; on Windows, use a primary-group account name or SID. The filter applies to both TUI and JSON totals.
+
 For a local source build, the executable is `target/release/zhandu` (`target/release/zhandu.exe` on Windows).
 
 ```sh
@@ -18,7 +22,7 @@ For a local source build, the executable is `target/release/zhandu` (`target/rel
 ./target/release/zhandu /shared/project --view groups
 
 # Filter by group or user (names or numeric IDs)
-./target/release/zhandu /shared/project --group research
+./target/release/zhandu /shared/project -g research
 ./target/release/zhandu /shared/project --group 1001 --user 1002
 
 # Reduce parallelism on shared storage; stay within one filesystem

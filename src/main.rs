@@ -43,7 +43,7 @@ struct Args {
     #[arg(long, value_enum, default_value = "directories")]
     view: View,
     /// Filter by group name / Unix GID / Windows SID
-    #[arg(long, value_name = "GROUP")]
+    #[arg(short = 'g', long, value_name = "GROUP")]
     group: Option<String>,
     /// Filter by user name / Unix UID / Windows SID
     #[arg(long, value_name = "USER")]

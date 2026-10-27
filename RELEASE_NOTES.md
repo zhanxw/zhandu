@@ -1,9 +1,9 @@
-First public release of **zhandu**, a fast terminal disk usage explorer.
+**zhandu v0.1.1** adds `-g GROUP` as a short form of `--group GROUP`.
 
-- Parallel directory and file-metadata scanning using a bounded Rayon worker pool.
-- Arrow-key browsing with separate owner and directory panels.
-- Usage by Unix user/group or Windows owner/primary-group SID.
-- Allocated/apparent size switching, hard-link deduplication, JSON output, exclusions, and cancellation.
+- Count only entries owned by the selected group in TUI and JSON totals.
+- Traverse directories of other groups to include matching descendants.
+- Accept group names or Unix GIDs, and Windows primary-group names or SIDs.
+- Install with `cargo install zhandu --locked`.
 
 ## Downloads
 

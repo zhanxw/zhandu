@@ -58,7 +58,7 @@ fn native_cli_reports_usage_and_rejects_missing_roots() {
     assert_eq!(report["total"]["inodes"], 2);
     #[cfg(windows)]
     {
-        for (option, field) in [("--user", "users"), ("--group", "groups")] {
+        for (option, field) in [("--user", "users"), ("--group", "groups"), ("-g", "groups")] {
             let sid = report[field][0]["sid"]
                 .as_str()
                 .expect("Windows JSON must identify owners by SID");
