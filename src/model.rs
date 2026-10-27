@@ -46,6 +46,7 @@ impl Filter {
 
 #[derive(Debug)]
 pub struct Node {
+    pub identity: (u64, u64),
     pub name: OsString,
     pub parent: Option<usize>,
     pub children: Vec<usize>,
@@ -234,6 +235,7 @@ mod tests {
     fn ownership_uses_descendants_not_directory_owner() {
         fn node(uid: u32, gid: u32, parent: Option<usize>, bytes: u64, is_dir: bool) -> Node {
             Node {
+                identity: (0, 0),
                 name: "test".into(),
                 parent,
                 children: vec![],

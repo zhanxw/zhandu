@@ -1,9 +1,12 @@
-**zhandu v0.1.1** adds `-g GROUP` as a short form of `--group GROUP`.
+**zhandu v0.2.0** adds a reviewed, file-only deletion workflow.
 
-- Count only entries owned by the selected group in TUI and JSON totals.
-- Traverse directories of other groups to include matching descendants.
-- Accept group names or Unix GIDs, and Windows primary-group names or SIDs.
-- Install with `cargo install zhandu --locked`.
+- **Space** marks/unmarks the highlighted regular file and advances; **d** still opens the file listing.
+- Visible `[x]` marks persist across navigation; the status shows marked count and estimated reclaimable space.
+- **x** reviews all marked paths; type **DELETE** and Enter to permanently delete, or Esc to cancel. **c** clears marks.
+- Directories, symlinks and special files cannot be marked; owner filtering never implies recursive deletion.
+- Changed files/parents are skipped; failures are reported. A background rescan refreshes totals after deletion.
+- Space estimates account for hard links; actual free space can differ due to open files, snapshots and shared blocks.
+- Install/update with `cargo install zhandu --locked`.
 
 ## Downloads
 

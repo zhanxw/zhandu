@@ -94,6 +94,10 @@ pub(crate) fn read_metadata(path: &Path) -> io::Result<EntryMetadata> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)?;
+    metadata_from_file(&file)
+}
+
+pub(crate) fn metadata_from_file(file: &std::fs::File) -> io::Result<EntryMetadata> {
     let handle = file.as_raw_handle();
     // SAFETY: both structs are POD buffers populated by the corresponding Win32 calls.
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };

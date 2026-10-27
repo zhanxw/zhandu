@@ -1102,13 +1102,14 @@ dependencies = [
 
 [[package]]
 name = "zhandu"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "clap",
  "crossterm",
  "ctrlc",
  "ratatui",
  "rayon",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

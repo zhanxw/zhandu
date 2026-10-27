@@ -2,7 +2,7 @@
 use crate::model::{Usage, display_name};
 use std::{io, path::Path};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct EntryMetadata {
     pub dev: u64,
     pub ino: u64,
@@ -64,6 +64,6 @@ pub fn owner_identifier(_: u32) -> Option<String> {
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::read_metadata;
+pub(crate) use windows::{metadata_from_file, read_metadata};
 #[cfg(windows)]
 pub use windows::{owner_identifier, owner_name, resolve_owner};

@@ -72,6 +72,23 @@ sys.exit(code)
             while time.monotonic() < end:
                 pump(0.02)
             os.write(master, b"q")
+        elif action == "delete":
+            wait_for(b"Inodes")
+            os.write(master, b" ")
+            wait_for(b"marked;")
+            os.write(master, b"x")
+            wait_for(b"Confirm:")
+            assert (path / "delete-me").exists()
+            os.write(master, b"\x1b")
+            end = time.monotonic() + 0.3
+            while time.monotonic() < end:
+                pump(0.02)
+            assert (path / "delete-me").exists()
+            os.write(master, b"xDELETE\r")
+            wait_for(b"result")
+            assert not (path / "delete-me").exists()
+            assert b"reclaimed:" in captured
+            os.write(master, b"\rq")
         elif action == "cancel":
             wait_for(b"Scanning")
             os.write(master, b"\x03")
@@ -102,6 +119,10 @@ with tempfile.TemporaryDirectory(prefix="zhandu-pty-") as tmp:
     session(root, "browse", 0)
     session(root / "missing", "error", 1)
     session(root, "interrupt", 130)
+    with tempfile.TemporaryDirectory(prefix="zhandu-delete-pty-") as delete_tmp:
+        delete_root = Path(delete_tmp)
+        (delete_root / "delete-me").write_bytes(b"z" * 8192)
+        session(delete_root, "delete", 0)
     for i in range(5000):
         (root / f"entry-{i:05}").touch()
     session(root, "cancel", 130)

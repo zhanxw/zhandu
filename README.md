@@ -1,6 +1,6 @@
 # zhandu
 
-A fast, read-only disk usage explorer written in Rust for **Windows, Linux, and macOS**. Scan recursively, browse with arrow keys, and compare usage by owning group or user.
+A fast disk usage explorer written in Rust for **Windows, Linux, and macOS**. Scan recursively, browse with arrow keys, and compare usage by owning group or user.
 
 [Download the latest release](https://github.com/zhanxw/zhandu/releases/latest) · [Build status](https://github.com/zhanxw/zhandu/actions/workflows/ci.yml)
 
@@ -37,6 +37,18 @@ For a local source build, the executable is `target/release/zhandu` (`target/rel
 
 Use the binary's absolute path from another directory to scan that directory, or install it on your PATH with `cargo install --path . --locked` from this project. No global installation was performed during development.
 
+## Mark and delete files
+
+Open the full file listing with `d` (preserves the selected owner filter). Use **Space** to toggle a file's `[x]` mark and advance the cursor. Marks persist across directories and filter changes; the status line shows their count and estimated reclaimable allocated bytes. `c` clears all marks.
+
+Press **x** to review every marked path, including marks outside the current directory/filter. Scroll with arrows. **Esc** returns without deleting. Type **DELETE** and press Enter to permanently delete the reviewed files. Quitting without confirmation discards marks. Directories, symlinks and special files cannot be marked; enter directories to select individual files. This prevents a recursive delete from including hidden or differently owned contents.
+
+Deletion and rescanning run in the background. The result lists deleted and failed/skipped files and estimated space reclaimed; failed entries must be explicitly marked again. The file listing and ownership totals refresh after deletion. Ctrl-C stops before the next file and waits for the worker before exiting; completed deletions cannot be undone.
+
+Files changed or replaced since marking, or whose parent directories no longer match the scan, are skipped. Unix deletion uses directory handles and does not follow symlink parents; Windows uses verified file handles. Unix cannot atomically compare a final filename's inode and unlink it, so avoid deletion in directories being concurrently renamed or modified by untrusted processes. Files must be readable for verification on Unix. No recursive deletion or trash recovery is provided.
+
+Space reclaimed is an **estimate**, based on current allocated bytes of successfully deleted files whose last hard link was removed. Open handles, filesystem snapshots, shared/reflink blocks, compression, and concurrent changes can make actual free-space gains differ. Remaining hard links contribute zero to the estimate. Estimates always use allocated bytes, even in apparent-size mode.
+
 ## Build
 
 Requires Rust 1.88 or newer. Native Windows (MSVC), Linux, and macOS builds are supported. Cargo.lock pins the dependency versions used for this build.
@@ -53,6 +65,9 @@ Use the release build for performance measurements. The first dependency downloa
 
 | Key | Action |
 | --- | --- |
+| Space | Mark/unmark the highlighted regular file and advance |
+| x | Review all marked files; type `DELETE` then Enter to permanently delete |
+| c | Clear all marks |
 | Up / Down, or k / j | Move selection |
 | Right / Enter | From owner panel: focus directory panel; from directory panel: open selected directory |
 | Left / Backspace, or h | Parent directory; at the owner view’s starting path, return focus to owners |
@@ -93,7 +108,7 @@ The initial screen reports scan progress and supports cancellation. Browsing ope
 | --- | --- |
 | 0 | Scan completed without reported filesystem errors |
 | 1 | Fatal error |
-| 2 | Partial scan, or command-line usage error (Clap) |
+| 2 | Partial scan/deletion, or command-line usage error (Clap) |
 | 130 | Cancelled or interrupted |
 
 When piping output, use `--json`; interactive mode requires terminal input and output.
@@ -124,9 +139,9 @@ The script creates and removes its own temporary fixture, verifies totals agains
 
 Local validation and native CI coverage:
 
-- Rust tests: sparse files, hard links across directories, symlinks/loops, hidden files, exclusions, denied directories, cancellation, deep trees, serial/parallel agreement, CLI output, ownership accounting, navigation, and tiny terminal sizes.
+- Rust tests: sparse files, hard links across directories, symlinks/loops, hidden files, exclusions, denied directories, cancellation, deep trees, serial/parallel agreement, CLI output, ownership accounting, navigation, tiny terminal sizes, changed-file rejection, ancestor swaps, deletion failures, and hard-link reclaim estimates.
 - A real second-group fixture using an existing permitted supplementary group; synthetic metadata also covers different UIDs and combined UID/GID filters.
-- Real PTY checks for keyboard navigation, resizing, normal quit, fatal scan errors, SIGINT, scan cancellation, and terminal-mode restoration.
+- Real PTY checks for keyboard navigation, resizing, normal quit, fatal scan errors, SIGINT, scan cancellation, mark/review/cancel/delete/rescan, and terminal-mode restoration.
 - Formatting and Clippy with warnings denied; optimized release build.
 
 ```sh

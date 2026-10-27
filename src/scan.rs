@@ -221,6 +221,7 @@ fn append_node(
     };
     let id = tree.nodes.len();
     tree.nodes.push(Node {
+        identity: (metadata.dev, metadata.ino),
         name,
         parent,
         children: Vec::new(),

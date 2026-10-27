@@ -1,4 +1,5 @@
 use crate::{
+    deletion::{self, Mark, Outcome},
     model::{Filter, Tree, Usage, display_name, human},
     scan::{Progress, ScanOptions, scan},
 };
@@ -10,8 +11,9 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
 };
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io,
+    path::PathBuf,
     sync::{Arc, atomic::Ordering, mpsc},
     time::{Duration, Instant},
 };
@@ -64,6 +66,13 @@ pub struct App {
     directory_selected: usize,
     directory_offset: usize,
     owner_scope: usize,
+    marks: BTreeMap<PathBuf, Mark>,
+    review: Option<String>,
+    review_scroll: u16,
+    notice: String,
+    delete_requested: bool,
+    busy: bool,
+    deletion_errors: bool,
 }
 
 impl App {
@@ -86,6 +95,13 @@ impl App {
             directory_selected: 0,
             directory_offset: 0,
             owner_scope: 0,
+            marks: BTreeMap::new(),
+            review: None,
+            review_scroll: 0,
+            notice: String::new(),
+            delete_requested: false,
+            busy: false,
+            deletion_errors: false,
         };
         app.rebuild();
         app
@@ -428,15 +444,143 @@ impl App {
         self.offset = self.offset.min(self.selected);
     }
 
+    fn toggle_mark(&mut self) {
+        if self.view != View::Directories {
+            self.notice = "Press d for the file listing, then Space to mark a file".into();
+            return;
+        }
+        let Some(Item::Node(id)) = self.rows.get(self.selected).map(|row| row.item) else {
+            self.notice = "Select a regular file; directory totals cannot be marked".into();
+            return;
+        };
+        let path = self.tree.path(id);
+        if self.marks.remove(&path).is_some() {
+            self.notice = "File unmarked".into();
+        } else {
+            if !self
+                .filter
+                .matches(self.tree.nodes[id].uid, self.tree.nodes[id].gid)
+            {
+                self.notice = "File does not match the active owner filter".into();
+                return;
+            }
+            match Mark::new(&self.tree, id) {
+                Ok(mark) => {
+                    self.marks.insert(path, mark);
+                    self.notice =
+                        "File marked; Space toggles, x reviews, c clears all marks".into();
+                }
+                Err(error) => {
+                    self.notice = display_name(error.to_string().as_ref());
+                    return;
+                }
+            }
+        }
+        self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1));
+    }
+
+    fn finish_deletion(&mut self, outcome: Outcome, scanned: io::Result<Tree>, previous: PathBuf) {
+        self.busy = false;
+        self.deletion_errors |= !outcome.failures.is_empty();
+        let mut message = format!(
+            "Deleted {} files; estimated space reclaimed: {}. {} failed/skipped.\nActual free space may differ (open files, snapshots, compression).",
+            outcome.deleted,
+            human(outcome.reclaimed),
+            outcome.failures.len()
+        );
+        // Failed entries require a fresh explicit mark after review; never silently retry.
+        for (mark, error) in outcome.failures.iter().take(100) {
+            message.push_str(&format!(
+                "\n{}: {}",
+                display_name(mark.path.as_os_str()),
+                display_name(error.as_ref())
+            ));
+        }
+        match scanned {
+            Ok(tree) => {
+                self.tree = tree;
+                self.current = (0..self.tree.nodes.len())
+                    .find(|&id| self.tree.nodes[id].is_dir && self.tree.path(id) == previous)
+                    .unwrap_or(0);
+                self.view = View::Directories;
+                self.owner_scope = self.current;
+                self.directory_focus = false;
+                self.selected = 0;
+                self.offset = 0;
+                self.rebuild();
+            }
+            Err(error) => {
+                self.deletion_errors = true;
+                // The old scan is stale. Disable further file actions until restart.
+                self.rows.clear();
+                self.tree.nodes.clear();
+                message.push_str(&format!(
+                    "\nRescan failed: {}. Restart zhandu to continue.",
+                    display_name(error.to_string().as_ref())
+                ));
+            }
+        }
+        self.notice = message;
+        self.review_scroll = 0;
+        self.review = Some(String::new());
+    }
+
     /// Returns true when the user requests quit.
     pub fn key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
+            return false;
+        }
+        if self.busy {
+            return false;
+        }
+        if let Some(input) = &mut self.review {
+            if self.marks.is_empty() {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => self.review = None,
+                    KeyCode::Down | KeyCode::PageDown => {
+                        self.review_scroll = self.review_scroll.saturating_add(1)
+                    }
+                    KeyCode::Up | KeyCode::PageUp => {
+                        self.review_scroll = self.review_scroll.saturating_sub(1)
+                    }
+                    _ => {}
+                }
+            } else {
+                match key.code {
+                    KeyCode::Esc => self.review = None,
+                    KeyCode::Backspace => {
+                        input.pop();
+                    }
+                    KeyCode::PageDown | KeyCode::Down => {
+                        self.review_scroll = self.review_scroll.saturating_add(1)
+                    }
+                    KeyCode::PageUp | KeyCode::Up => {
+                        self.review_scroll = self.review_scroll.saturating_sub(1)
+                    }
+                    KeyCode::Char(c)
+                        if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                    {
+                        if input.len() < 6 {
+                            input.push(c);
+                        }
+                    }
+                    KeyCode::Enter if input == "DELETE" && key.kind == KeyEventKind::Press => {
+                        self.delete_requested = true;
+                        self.busy = true;
+                        self.review = None;
+                    }
+                    _ => {}
+                }
+            }
             return false;
         }
         if key.code == KeyCode::Char('q')
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             return true;
+        }
+        if self.tree.nodes.is_empty() {
+            return false;
         }
         if self.overlay.is_some() {
             match key.code {
@@ -450,6 +594,29 @@ impl App {
                 _ => {}
             }
             return false;
+        }
+        if self.overlay.is_none() && key.kind == KeyEventKind::Press {
+            match key.code {
+                KeyCode::Char(' ') => {
+                    self.toggle_mark();
+                    return false;
+                }
+                KeyCode::Char('c') => {
+                    self.marks.clear();
+                    self.notice = "All marks cleared".into();
+                    return false;
+                }
+                KeyCode::Char('x') => {
+                    if self.marks.is_empty() {
+                        self.notice = "No files marked. Use Space on a file first".into();
+                    } else {
+                        self.review = Some(String::new());
+                        self.review_scroll = 0;
+                    }
+                    return false;
+                }
+                _ => {}
+            }
         }
         if self.view != View::Directories && self.picker_key(key) {
             return false;
@@ -574,10 +741,80 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
+        if self.busy {
+            frame.render_widget(Paragraph::new("Deleting confirmed files and rescanning...\nCtrl-C stops before the next file; already deleted files cannot be restored.")
+                .block(Block::default().borders(Borders::ALL).title(" zhandu ")).wrap(Wrap { trim: false }), frame.area());
+            return;
+        }
+        if let Some(input) = &self.review {
+            if self.marks.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(format!("{}\n\nEnter / Esc: return", self.notice))
+                        .wrap(Wrap { trim: false })
+                        .scroll((self.review_scroll, 0))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(" Deletion result "),
+                        ),
+                    frame.area(),
+                );
+            } else {
+                let areas = Layout::vertical([
+                    Constraint::Length(6),
+                    Constraint::Min(1),
+                    Constraint::Length(3),
+                ])
+                .split(frame.area());
+                let header = format!(
+                    "Permanently delete {} marked files?\nEstimated reclaimable: {} (allocated bytes, not guaranteed free space).\nAll marks are included, even outside this directory or active filter.\nNo undo. Esc cancels. Type DELETE, then Enter to confirm.",
+                    self.marks.len(),
+                    human(deletion::estimate(self.marks.values()))
+                );
+                frame.render_widget(
+                    Paragraph::new(header).wrap(Wrap { trim: false }).block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" Review deletion "),
+                    ),
+                    areas[0],
+                );
+                let paths = self
+                    .marks
+                    .keys()
+                    .map(|p| display_name(p.as_os_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                frame.render_widget(
+                    Paragraph::new(paths)
+                        .wrap(Wrap { trim: false })
+                        .scroll((self.review_scroll, 0))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(" Marked files · ↑↓ scroll "),
+                        ),
+                    areas[1],
+                );
+                frame.render_widget(
+                    Paragraph::new(format!("Confirm: {input}"))
+                        .block(Block::default().borders(Borders::ALL)),
+                    areas[2],
+                );
+            }
+            return;
+        }
+        if self.tree.nodes.is_empty() {
+            frame.render_widget(
+                Paragraph::new(format!("{}\nq: quit", self.notice)).wrap(Wrap { trim: false }),
+                frame.area(),
+            );
+            return;
+        }
         let areas = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(1),
-            Constraint::Length(4),
+            Constraint::Length(6),
         ])
         .split(frame.area());
         let incomplete = if self.tree.error_count > 0 {
@@ -602,7 +839,7 @@ impl App {
         );
         if let Some(help) = self.overlay {
             let text = if help {
-                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng: choose group   u: choose user   d: directories   Esc: clear BOTH filters\na: allocated / apparent size    s: size / name sort\nHome/End, PageUp/PageDown: move   e: errors   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nDirectory panel: →/Enter opens, ← goes up (at starting path: owners).\nTab switches focus; d opens full file listing with the same filter.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nEsc closes this panel. No files are modified or deleted.".to_owned()
+                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng: choose group   u: choose user   d: directories   Esc: clear BOTH filters\na: allocated / apparent size    s: size / name sort\nHome/End, PageUp/PageDown: move   e: errors   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nDirectory panel: →/Enter opens, ← goes up (at starting path: owners).\nTab switches focus; d opens full file listing with the same filter.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. q exits without deleting marks.\nEsc closes this panel.".to_owned()
             } else if self.tree.errors.is_empty() {
                 "No scan errors.".to_owned()
             } else {
@@ -653,7 +890,7 @@ impl App {
                         Cell::from(human(bytes)),
                         Cell::from(format!("{percent:5.1}%")),
                         Cell::from(entry.usage.inodes.to_string()),
-                        Cell::from(entry.name.as_str()),
+                        Cell::from(format!("{}{}", if matches!(entry.item, Item::Node(id) if self.marks.contains_key(&self.tree.path(id))) { "[x] " } else { "    " }, entry.name)),
                     ])
                 });
             let table = Table::new(
@@ -690,12 +927,15 @@ impl App {
             active.gid.map_or("all".into(), |id| id.to_string())
         );
         let status = format!(
-            "Total {} | {} inodes | {} | scan {:.2}s | {} errors\n↑↓ select  → enter  ← parent  Tab panels  Esc clear  a size  s sort  e errors  ? help  q quit",
+            "Total {} | {} inodes | {} | scan {:.2}s | {} errors\nMarked {} files | est. reclaimable {} | Space mark  x review/delete  c unmark all\n{}\n↑↓ select  → enter  ← parent  d files  g/u owners  Esc filters  ? help  q quit",
             human(usage.bytes(self.apparent)),
             usage.inodes,
             filter,
             self.tree.elapsed_seconds,
-            self.tree.error_count
+            self.tree.error_count,
+            self.marks.len(),
+            human(deletion::estimate(self.marks.values())),
+            self.notice.lines().next().unwrap_or("")
         );
         frame.render_widget(
             Paragraph::new(status)
@@ -703,6 +943,19 @@ impl App {
                 .block(Block::default().borders(Borders::ALL)),
             areas[2],
         );
+    }
+}
+
+struct DeletionWorker {
+    handle: Option<std::thread::JoinHandle<()>>,
+    progress: Arc<Progress>,
+}
+impl Drop for DeletionWorker {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.progress.cancel();
+            let _ = handle.join();
+        }
     }
 }
 
@@ -719,6 +972,7 @@ pub fn run(
         let root_label = display_name(options.path.as_os_str());
         let start = Instant::now();
         let (sender, receiver) = mpsc::channel();
+        let rescan_options = options.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
             let result = scan(options, worker_progress);
@@ -752,7 +1006,6 @@ pub fn run(
                 return Ok(130);
             }
         };
-        let exit_code = if tree.error_count == 0 { 0 } else { 2 };
         let (names_tx, names_rx) = mpsc::channel();
         if !numeric {
             let ids: Vec<_> = tree.nodes[0].owners.keys().copied().collect();
@@ -775,16 +1028,56 @@ pub fn run(
         }
         let mut app = App::new(tree, filter, view, apparent);
         let mut dirty = true;
+        let (delete_tx, delete_rx) = mpsc::channel();
+        let mut deletion_worker = DeletionWorker {
+            handle: None,
+            progress: progress.clone(),
+        };
         loop {
-            if progress.is_cancelled() {
+            if let Ok((outcome, scanned, previous)) = delete_rx.try_recv() {
+                if let Some(handle) = deletion_worker.handle.take() {
+                    handle
+                        .join()
+                        .map_err(|_| io::Error::other("deletion worker panicked"))?;
+                }
+                app.finish_deletion(outcome, scanned, previous);
+                dirty = true;
+            }
+            if deletion_worker
+                .handle
+                .as_ref()
+                .is_some_and(|handle| handle.is_finished())
+            {
+                deletion_worker
+                    .handle
+                    .take()
+                    .unwrap()
+                    .join()
+                    .map_err(|_| io::Error::other("deletion worker panicked"))?;
+            }
+            if progress.is_cancelled() && !app.busy {
                 return Ok(130);
+            }
+            if app.delete_requested {
+                app.delete_requested = false;
+                terminal.draw(|frame| app.draw(frame))?;
+                let marks = std::mem::take(&mut app.marks).into_values().collect();
+                let previous = app.tree.path(app.current);
+                let options = rescan_options.clone();
+                let worker_progress = progress.clone();
+                let sender = delete_tx.clone();
+                deletion_worker.handle = Some(std::thread::spawn(move || {
+                    let outcome = deletion::execute(marks, &worker_progress);
+                    let scanned = scan(options, worker_progress);
+                    let _ = sender.send((outcome, scanned, previous));
+                }));
             }
             let mut names_changed = false;
             for (id, name) in names_rx.try_iter() {
                 app.names.insert(id, name);
                 names_changed = true;
             }
-            if names_changed && app.view != View::Directories {
+            if names_changed && app.view != View::Directories && !app.tree.nodes.is_empty() {
                 let selected = app.rows.get(app.selected).map(|entry| entry.item);
                 app.rebuild();
                 if let Some(selected) = selected {
@@ -807,10 +1100,17 @@ pub fn run(
                             && key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
-                            return Ok(130);
+                            progress.cancel();
+                            if !app.busy {
+                                return Ok(130);
+                            }
                         }
                         if app.key(key) {
-                            return Ok(exit_code);
+                            return Ok(if app.deletion_errors || app.tree.error_count > 0 {
+                                2
+                            } else {
+                                0
+                            });
                         }
                         dirty = true;
                     }
@@ -826,6 +1126,107 @@ pub fn run(
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn marking_review_confirmation_and_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file"), [7; 8192]).unwrap();
+        let options = ScanOptions {
+            path: dir.path().into(),
+            threads: 1,
+            one_file_system: false,
+            excludes: vec![],
+        };
+        let tree = scan(options.clone(), Arc::default()).unwrap();
+        let mut app = App::new(tree, Filter::default(), View::Directories, false);
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let select_file = |app: &mut App| {
+            app.selected = app.rows.iter().position(|r| r.name == "file").unwrap();
+        };
+        select_file(&mut app);
+        let cursor = app.selected;
+        app.key(press(KeyCode::Char(' ')));
+        assert_eq!(app.marks.len(), 1);
+        assert_ne!(app.selected, cursor);
+        select_file(&mut app);
+        app.key(press(KeyCode::Char(' ')));
+        assert!(app.marks.is_empty());
+        select_file(&mut app);
+        app.key(press(KeyCode::Char(' ')));
+        // Marks survive navigation/view and filter changes.
+        app.key(press(KeyCode::Char('g')));
+        app.key(press(KeyCode::Esc));
+        assert_eq!(app.marks.len(), 1);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("[x] file"));
+        assert!(text.contains("Marked 1 files"));
+        app.key(press(KeyCode::Char('x')));
+        app.key(press(KeyCode::Enter));
+        assert!(!app.delete_requested);
+        app.key(press(KeyCode::Esc));
+        assert!(dir.path().join("file").exists());
+        assert_eq!(app.marks.len(), 1);
+        app.key(press(KeyCode::Char('x')));
+        for (w, h) in [(120, 30), (20, 5), (1, 1)] {
+            Terminal::new(TestBackend::new(w, h))
+                .unwrap()
+                .draw(|f| app.draw(f))
+                .unwrap();
+        }
+        for c in "DELETE".chars() {
+            app.key(press(KeyCode::Char(c)));
+        }
+        app.key(press(KeyCode::Enter));
+        assert!(app.delete_requested && app.busy);
+        let marks = std::mem::take(&mut app.marks).into_values().collect();
+        let outcome = deletion::execute(marks, &Progress::default());
+        app.finish_deletion(
+            outcome,
+            scan(options, Arc::default()),
+            dir.path().canonicalize().unwrap(),
+        );
+        assert!(!dir.path().join("file").exists());
+        assert!(app.notice.contains("Deleted 1 files"));
+        assert!(app.marks.is_empty());
+        assert!(!app.rows.iter().any(|r| r.name == "file"));
+        app.key(press(KeyCode::Enter));
+        assert!(app.review.is_none());
+        app.key(press(KeyCode::Char('x')));
+        assert!(app.review.is_none());
+    }
+
+    #[test]
+    fn marks_cannot_include_directories_or_other_owners() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("file"), b"data").unwrap();
+        let tree = scan(
+            ScanOptions {
+                path: dir.path().into(),
+                threads: 1,
+                one_file_system: false,
+                excludes: vec![],
+            },
+            Arc::default(),
+        )
+        .unwrap();
+        let mut app = App::new(tree, Filter::default(), View::Directories, false);
+        app.selected = app.rows.iter().position(|r| r.name == "nested/").unwrap();
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.marks.is_empty());
+        app.selected = app.rows.iter().position(|r| r.name == "file").unwrap();
+        app.filter.gid = Some(app.tree.nodes[0].gid.wrapping_add(1));
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.marks.is_empty());
+    }
 
     #[test]
     fn directory_panel_scrolls_and_keeps_its_cursor_when_returning_to_parent() {
