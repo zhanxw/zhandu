@@ -75,7 +75,7 @@ Snapshot replacement is transactional. Interrupted refreshes retain both previou
 
 ## Mark and delete files
 
-Open the full file listing with `d` (preserves the selected owner filter). Use **Space** to toggle a file's `[x]` mark and advance the cursor. Marks persist across directories and filter changes; the status line shows their count and estimated reclaimable allocated bytes. `c` clears all marks.
+Press `d` to show files as well as directories in the browser; the layout and owner filter stay unchanged. Use Tab to focus the browser if needed. Use **Space** to toggle a file's `[x]` mark and advance the cursor. Marks persist across directories and filter changes; the status line shows their count and estimated reclaimable allocated bytes. `c` clears all marks.
 
 Press **x** to review every marked path, including marks outside the current directory/filter. Scroll with arrows. **Esc** returns without deleting. Type **DELETE** and press Enter to permanently delete the reviewed files. Quitting without confirmation discards marks. Directories, symlinks and special files cannot be marked; enter directories to select individual files. This prevents a recursive delete from including hidden or differently owned contents.
 
@@ -106,9 +106,11 @@ Use the release build for performance measurements. The first dependency downloa
 | c | Clear all marks |
 | Up / Down, or k / j | Move selection |
 | Right / Enter | From owner panel: focus directory panel; from directory panel: open selected directory |
-| Left / Backspace, or h | Parent directory; at the owner view’s starting path, return focus to owners |
-| Tab / Shift-Tab | Switch owner/directory panel focus; the full file view has only one panel |
-| g / u / d | Choose group / choose user / directory browser |
+| Left / Backspace, or h | In the browser, go to the parent directory; stop at the scan root without changing focus |
+| Tab / Shift-Tab | Switch owner/browser focus in two-panel mode; no layout change in single-panel mode |
+| g / u | Show two panels and focus Groups / Users, keeping the browser path and cursor |
+| v | Toggle single/two-panel layout, retaining path, filters, browser selection and scroll |
+| d | Toggle directories-only / files-and-directories, retaining layout and focus |
 | / | Search names or owners in the focused panel (case-insensitive substring); Enter finishes typing |
 | Escape | Close help/error panel first; otherwise clear focused-panel search before clearing both ownership filters |
 | r | Refresh in the background, preserving navigation and filters; revalidate existing marks |
@@ -122,15 +124,17 @@ Use the release build for performance measurements. The first dependency downloa
 | q | Quit |
 | Ctrl-C | Cancel / interrupt |
 
-Press **g** or **u** to choose an owner. **All groups** and **All users** stay pinned at the top of the owner list; **Home**, then **Enter** selects All while retaining the other ownership filter. Reopening a picker selects the current owner. The named user and group filters are displayed below the current path; `Preview` means the highlighted owner controls the right-panel preview. The selector shows a **subdirectory usage preview** for the highlighted group or user; up/down changes the preview. Press **Right** or **Enter** to move the cursor into the directory panel. Up/down selects a directory there; Right/Enter opens it and Left/Backspace returns to its parent. **Tab** switches focus back to the owner list without changing the current path. The focused panel has a cyan border. Press **d** for a full file-and-directory listing with the selected filter. Each subdirectory size includes all matching descendants, regardless of the directory's own owner. Directories with zero matching usage remain visible.
+The default layout has two panels: a Users/Groups selector on the left and a directory browser on the right (stacked on narrow terminals). The browser initially shows directories only. Press **g** or **u** to focus the corresponding owner selector. **All groups** and **All users** stay pinned; **Home**, then **Enter** selects All while preserving the other filter. The selected owner controls the browser at the current path. **Enter/Right** from owners focuses the browser; **Tab** switches focus between panels.
 
-The selector appears beside the preview in wide terminals and above it in narrower terminals. Both panels scroll independently. The owner list and its totals stay anchored to the directory where you opened the selector, so the selected owner stays available even when a visited subdirectory has no matching usage. At that starting directory, Left returns focus to the owner list. A selected group and user filter combine with AND. Reopening g or u lists alternatives to the current owner while retaining the other dimension's filter. Escape clears the focused panel’s search first, then both filters. Names resolve asynchronously. Unix numeric IDs and Windows SID strings remain visible if lookups fail. `--numeric-ids` disables display-name lookups (explicit command-line names still require resolution).
+In the browser, **Enter/Right** opens a directory and **Left/Backspace** always goes to its parent, stopping at the scan root. These keys never transfer focus back to owners. Press **d** to reveal files or return to directories-only; it does not change layout, path, filters or focus. Files can be marked with Space directly in the two-panel browser. Press **v** to expand the browser to a single panel, and **v** again to restore two panels with focus in the browser. Selection and scroll position are retained where the terminal size permits. `u`/`g` also restore two panels and focus the owner selector. Use `--view directories` for an explicit single-panel startup with files visible; `--view users` (default) and `--view groups` start with two panels.
+
+Owner totals always describe the current browser directory. A selected owner with no matching entries remains selected with an explicit zero-result message. User and group filters combine with AND. Esc clears the focused panel's search first, then both filters, without switching layout. Names resolve asynchronously; numeric IDs or Windows SIDs remain visible when lookups fail. `--numeric-ids` disables display-name lookup. Named user/group filters remain visible beneath the path. The footer advertises `v: single panel` / `v: two panels` and the next `d` action.
 
 The initial screen reports scan progress and supports cancellation. Browsing opens as metadata arrives, or after a saved cache loads. Subsequent navigation and ownership filtering use the in-memory tree and do not rescan the disk.
 
-Search with **/** in the focused panel, type a name or owner ID, then press **Enter** to navigate the matches. Search filters the visible list, not disk-usage totals or existing file marks. The All row remains visible during owner search. User/group pickers search independently from directory names. Entering another directory or switching views clears the directory search. Shortcut letters (including `q`, `x`, and Space) are text while typing a search. **Esc** clears it without changing the committed ownership filters.
+Search with **/** in the focused panel, type a name or owner ID, then press **Enter** to navigate the matches. Search filters the visible list, not disk-usage totals or existing file marks. The All row remains visible during owner search. User/group pickers search independently from directory names. Entering another directory clears the browser search; layout and file-visibility toggles preserve it. Shortcut letters (including `q`, `x`, and Space) are text while typing a search. **Esc** clears it without changing the committed ownership filters.
 
-The owner panel labels its original scope; the directory panel labels the path currently being browsed. Totals may differ when these paths differ. **Tab** only changes focus in a split view; use `g` or `u` to open an owner picker from the full file listing.
+Both panels use the current path. Switching layout or reopening the owner selector does not establish a new navigation boundary.
 
 ## Accounting rules
 

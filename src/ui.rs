@@ -53,6 +53,8 @@ pub struct App {
     tree: Tree,
     current: usize,
     view: View,
+    owner_view: View,
+    show_files: bool,
     filter: Filter,
     apparent: bool,
     sort_name: bool,
@@ -95,6 +97,12 @@ impl App {
             tree,
             current: 0,
             view,
+            owner_view: if view == View::Groups {
+                View::Groups
+            } else {
+                View::Users
+            },
+            show_files: view == View::Directories,
             filter,
             apparent,
             sort_name: false,
@@ -269,24 +277,55 @@ impl App {
         }
     }
 
-    fn subdirectories(&self, filter: Filter) -> Vec<Entry> {
-        let query = self.directory_search.to_lowercase();
-        let mut entries: Vec<_> = self.tree.nodes[self.current]
+    fn browser_entries(&self, filter: Filter) -> Vec<Entry> {
+        self.browser_entries_with_query(filter, &self.directory_search)
+    }
+
+    fn browser_entries_with_query(&self, filter: Filter, query: &str) -> Vec<Entry> {
+        let query = query.to_lowercase();
+        let node = &self.tree.nodes[self.current];
+        let mut entries: Vec<_> = node
             .children
             .iter()
-            .filter(|&&id| self.tree.nodes[id].is_dir)
-            .map(|&id| Entry {
-                item: Item::Node(id),
-                name: format!("{}/", display_name(&self.tree.nodes[id].name)),
-                usage: self.tree.nodes[id].usage(filter),
+            .filter_map(|&id| {
+                let child = &self.tree.nodes[id];
+                if !self.show_files && !child.is_dir {
+                    return None;
+                }
+                let usage = child.usage(filter);
+                if !filter.is_empty() && usage.inodes == 0 && !child.is_dir {
+                    return None;
+                }
+                let mut name = display_name(&child.name);
+                if child.is_dir {
+                    name.push('/');
+                }
+                if child.is_symlink {
+                    name.push_str(" @");
+                }
+                if child.shared_link {
+                    name.push_str(" [hard link: counted elsewhere]");
+                }
+                Some(Entry {
+                    item: Item::Node(id),
+                    name,
+                    usage,
+                })
             })
-            .filter(|entry| {
-                !self.hide_zero
-                    || entry.usage.bytes(self.apparent) > 0
-                    || self.uncertain_usage(entry.item)
-            })
-            .filter(|entry| query.is_empty() || entry.name.to_lowercase().contains(&query))
             .collect();
+        if self.show_files && filter.matches(node.uid, node.gid) {
+            entries.push(Entry {
+                item: Item::SelfUsage,
+                name: "[directory itself]".into(),
+                usage: node.own,
+            });
+        }
+        entries.retain(|entry| {
+            (!self.hide_zero
+                || entry.usage.bytes(self.apparent) > 0
+                || self.uncertain_usage(entry.item))
+                && (query.is_empty() || entry.name.to_lowercase().contains(&query))
+        });
         entries.sort_by(|a, b| {
             if self.sort_name {
                 a.name.cmp(&b.name)
@@ -300,6 +339,54 @@ impl App {
         entries
     }
 
+    fn browser_cursor(&self) -> (usize, usize) {
+        if self.view == View::Directories {
+            (self.selected, self.offset)
+        } else {
+            (self.directory_selected, self.directory_offset)
+        }
+    }
+
+    fn toggle_layout(&mut self) {
+        let (selected, offset) = self.browser_cursor();
+        if let Some(filter) = self.preview_filter() {
+            self.filter = filter;
+        }
+        if self.view == View::Directories {
+            self.open_picker(self.owner_view);
+            self.directory_focus = true;
+            self.directory_selected = selected;
+            self.directory_offset = offset;
+        } else {
+            self.owner_view = self.view;
+            self.view = View::Directories;
+            self.directory_focus = false;
+            self.rows.clear();
+            self.rebuild();
+            self.selected = selected.min(self.rows.len().saturating_sub(1));
+            self.offset = offset.min(self.selected);
+        }
+    }
+
+    fn toggle_files(&mut self) {
+        let (selected, offset) = self.browser_cursor();
+        let filter = self.preview_filter().unwrap_or(self.filter);
+        let anchor = self.browser_entries(filter).get(selected).map(|e| e.item);
+        self.show_files = !self.show_files;
+        self.rebuild();
+        let entries = self.browser_entries(filter);
+        let index = anchor
+            .and_then(|item| entries.iter().position(|e| e.item == item))
+            .unwrap_or(selected.min(entries.len().saturating_sub(1)));
+        if self.view == View::Directories {
+            self.selected = index;
+            self.offset = offset.min(index);
+        } else {
+            self.directory_selected = index;
+            self.directory_offset = offset.min(index);
+        }
+    }
+
     fn focus_directories(&mut self) {
         if let Some(filter) = self.preview_filter() {
             self.filter = filter;
@@ -308,13 +395,17 @@ impl App {
     }
 
     fn open_picker(&mut self, view: View) {
+        let (selected, offset) = self.browser_cursor();
+        if let Some(filter) = self.preview_filter() {
+            self.filter = filter;
+        }
         self.view = view;
+        self.owner_view = view;
         self.owner_scope = self.current;
         self.directory_focus = false;
-        self.directory_selected = 0;
-        self.directory_offset = 0;
+        self.directory_selected = selected;
+        self.directory_offset = offset;
         self.owner_search.clear();
-        self.directory_search.clear();
         self.rows.clear();
         self.rebuild();
         let id = if view == View::Groups {
@@ -357,7 +448,7 @@ impl App {
         let Some(filter) = self.preview_filter() else {
             return false;
         };
-        let entries = self.subdirectories(filter);
+        let entries = self.browser_entries(filter);
         self.directory_selected = self.directory_selected.min(entries.len().saturating_sub(1));
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
@@ -380,6 +471,9 @@ impl App {
                     ..
                 }) = entries.get(self.directory_selected)
                 {
+                    if !self.tree.nodes[*id].is_dir {
+                        return true;
+                    }
                     self.current = *id;
                     self.directory_search.clear();
                     self.directory_selected = 0;
@@ -388,15 +482,13 @@ impl App {
                 }
             }
             KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => {
-                if self.current == self.owner_scope {
-                    self.directory_focus = false;
-                } else if let Some(parent) = self.tree.nodes[self.current].parent {
+                if let Some(parent) = self.tree.nodes[self.current].parent {
                     let previous = self.current;
                     self.current = parent;
                     self.directory_search.clear();
                     self.rebuild();
                     self.directory_selected = self
-                        .subdirectories(filter)
+                        .browser_entries(filter)
                         .iter()
                         .position(|e| e.item == Item::Node(previous))
                         .unwrap_or(0);
@@ -451,7 +543,7 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(format!(
-                        " Choose {owner} · {} matches / {} owners · → ",
+                        " {owner} · u Users / g Groups · {} / {} ",
                         self.rows.len().saturating_sub(1),
                         self.row_total
                     ))
@@ -482,7 +574,7 @@ impl App {
         }
         frame.render_stateful_widget(table, panes[0], &mut state);
         if let Some(filter) = self.preview_filter() {
-            let entries = self.subdirectories(filter);
+            let entries = self.browser_entries(filter);
             let height = panes[1].height.saturating_sub(3).max(1) as usize;
             self.directory_selected = self.directory_selected.min(entries.len().saturating_sub(1));
             if self.directory_selected < self.directory_offset {
@@ -499,7 +591,7 @@ impl App {
                     Row::new([
                         self.usage_label(entry.item, entry.usage),
                         self.status_label(entry.item),
-                        entry.name.clone(),
+                        format!("{}{}", if matches!(entry.item, Item::Node(id) if self.marks.contains_key(&self.tree.path(id))) { "[x] " } else if self.show_files { "    " } else { "" }, entry.name),
                     ])
                 });
             let selected = &self.rows[self.selected].name;
@@ -512,20 +604,28 @@ impl App {
                 ],
             )
             .header(
-                Row::new(["Size", "Status", "Subdirectory"])
-                    .style(Style::default().add_modifier(Modifier::BOLD)),
+                Row::new([
+                    "Size",
+                    "Status",
+                    if self.show_files {
+                        "Name"
+                    } else {
+                        "Subdirectory"
+                    },
+                ])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(format!(
-                        " {} shown / {} dirs · {selected} · Tab owners ",
-                        entries.len(),
-                        self.tree.nodes[self.current]
-                            .children
-                            .iter()
-                            .filter(|&&id| self.tree.nodes[id].is_dir)
-                            .count()
+                        " {} · {} shown · {selected} · Tab owners ",
+                        if self.show_files {
+                            "Files + directories"
+                        } else {
+                            "Directories only"
+                        },
+                        entries.len()
                     ))
                     .title_bottom(format!(" Browsing {} ", self.path))
                     .border_style(Style::default().fg(if self.directory_focus {
@@ -546,9 +646,9 @@ impl App {
                 let inner = Block::default().borders(Borders::ALL).inner(panes[1]);
                 frame.render_widget(
                     Paragraph::new(if self.directory_search.is_empty() {
-                        "No subdirectories. d shows files; ← returns; Tab selects owner."
+                        "No entries here. d toggles files; ← goes up; Tab selects owners."
                     } else {
-                        "No matching directories. Esc clears search."
+                        "No matching entries. Esc clears search."
                     }),
                     inner,
                 );
@@ -562,56 +662,15 @@ impl App {
     }
 
     fn rebuild(&mut self) {
+        self.owner_scope = self.current;
         let owner = if self.view != View::Directories {
             self.rows.get(self.selected).map(|entry| entry.item)
         } else {
             None
         };
         self.path = display_name(self.tree.path(self.current).as_os_str());
-        let node = &self.tree.nodes[self.current];
         self.rows = match self.view {
-            View::Directories => {
-                let mut entries: Vec<_> = node
-                    .children
-                    .iter()
-                    .filter_map(|&id| {
-                        let child = &self.tree.nodes[id];
-                        let usage = child.usage(self.filter);
-                        if !self.filter.is_empty() && usage.inodes == 0 && !child.is_dir {
-                            return None;
-                        }
-                        if self.hide_zero
-                            && usage.bytes(self.apparent) == 0
-                            && !self.uncertain_usage(Item::Node(id))
-                        {
-                            return None;
-                        }
-                        let mut name = display_name(&child.name);
-                        if child.is_dir {
-                            name.push('/');
-                        }
-                        if child.is_symlink {
-                            name.push_str(" @");
-                        }
-                        if child.shared_link {
-                            name.push_str(" [hard link: counted elsewhere]");
-                        }
-                        Some(Entry {
-                            item: Item::Node(id),
-                            name,
-                            usage,
-                        })
-                    })
-                    .collect();
-                if self.filter.matches(node.uid, node.gid) {
-                    entries.push(Entry {
-                        item: Item::SelfUsage,
-                        name: "[directory itself]".into(),
-                        usage: node.own,
-                    });
-                }
-                entries
-            }
+            View::Directories => self.browser_entries_with_query(self.filter, ""),
             _ => self
                 .tree
                 .ownership(
@@ -695,7 +754,7 @@ impl App {
         let selected = self.rows.get(self.selected).map(|r| r.item);
         let directory = self.live_directory_anchor.take().or_else(|| {
             self.preview_filter().and_then(|filter| {
-                self.subdirectories(filter)
+                self.browser_entries(filter)
                     .get(self.directory_selected)
                     .map(|r| r.item)
             })
@@ -774,7 +833,7 @@ impl App {
         if let Some(target) = directory_target
             && let Some(filter) = self.preview_filter()
             && let Some(index) = self
-                .subdirectories(filter)
+                .browser_entries(filter)
                 .iter()
                 .position(|r| r.item == target)
         {
@@ -791,11 +850,13 @@ impl App {
                     .into();
             return;
         }
-        if self.view != View::Directories {
-            self.notice = "Press d for the file listing, then Space to mark a file".into();
+        if self.view != View::Directories && !self.directory_focus {
+            self.notice = "Tab focuses the browser; d reveals files; Space marks a file".into();
             return;
         }
-        let Some(Item::Node(id)) = self.rows.get(self.selected).map(|row| row.item) else {
+        let entries = self.browser_entries(self.filter);
+        let (selected, _) = self.browser_cursor();
+        let Some(Item::Node(id)) = entries.get(selected).map(|row| row.item) else {
             self.notice = "Select a regular file; directory totals cannot be marked".into();
             return;
         };
@@ -822,7 +883,12 @@ impl App {
                 }
             }
         }
-        self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1));
+        let next = (selected + 1).min(entries.len().saturating_sub(1));
+        if self.view == View::Directories {
+            self.selected = next;
+        } else {
+            self.directory_selected = next;
+        }
     }
 
     fn finish_deletion(&mut self, outcome: Outcome, scanned: io::Result<Tree>, previous: PathBuf) {
@@ -848,9 +914,9 @@ impl App {
                 self.current = (0..self.tree.nodes.len())
                     .find(|&id| self.tree.nodes[id].is_dir && self.tree.path(id) == previous)
                     .unwrap_or(0);
-                self.view = View::Directories;
                 self.owner_scope = self.current;
-                self.directory_focus = false;
+                self.directory_selected = 0;
+                self.directory_offset = 0;
                 self.selected = 0;
                 self.offset = 0;
                 self.rebuild();
@@ -1021,7 +1087,7 @@ impl App {
             KeyCode::Home => self.selected = 0,
             KeyCode::End => self.selected = self.rows.len().saturating_sub(1),
             KeyCode::Tab | KeyCode::BackTab => {
-                self.notice = "One panel here. u chooses users; g chooses groups".into()
+                self.notice = "One panel here. v restores two panels; u/g opens owners".into()
             }
             KeyCode::Char('g') => {
                 self.open_picker(View::Groups);
@@ -1032,15 +1098,12 @@ impl App {
                 return false;
             }
             KeyCode::Char('d') => {
-                if let Some(filter) = self.preview_filter() {
-                    self.filter = filter;
-                }
-                self.view = View::Directories;
-                self.directory_focus = false;
-                self.owner_search.clear();
-                self.directory_search.clear();
-                self.selected = 0;
-                changed = true;
+                self.toggle_files();
+                return false;
+            }
+            KeyCode::Char('v') => {
+                self.toggle_layout();
+                return false;
             }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
                 if let Some(entry) = self.rows.get(self.selected) {
@@ -1080,9 +1143,8 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                self.view = View::Directories;
-                self.directory_focus = false;
                 self.filter = Filter::default();
+                self.rows.clear();
                 self.owner_search.clear();
                 self.directory_search.clear();
                 self.selected = 0;
@@ -1125,6 +1187,9 @@ impl App {
             _ => {}
         }
         if self.view != View::Directories && self.selected != old_selected {
+            if let Some(filter) = self.preview_filter() {
+                self.filter = filter;
+            }
             self.directory_selected = 0;
             self.directory_offset = 0;
         }
@@ -1138,7 +1203,7 @@ impl App {
     fn selected_details(&self) -> String {
         let item = if self.directory_focus {
             self.preview_filter().and_then(|filter| {
-                self.subdirectories(filter)
+                self.browser_entries(filter)
                     .get(self.directory_selected)
                     .map(|e| e.item)
             })
@@ -1326,7 +1391,7 @@ impl App {
             let text = if matches!(overlay, Overlay::Details) {
                 self.details.clone()
             } else if matches!(overlay, Overlay::Help) {
-                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng: choose group   u: choose user   d: directories   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nDirectory panel: →/Enter opens, ← goes up (at starting path: owners).\nTab switches focus in owner views; d opens files with the same filter.\nAll stays pinned. Owner totals use the labeled scope; browsing may be deeper.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. q exits without deleting marks.\nEsc closes this panel.".to_owned()
+                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng/u: focus Groups/Users   d: toggle files   v: toggle one/two panels   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nBrowser: →/Enter opens directories; ←/Backspace always goes up (root stops).\nTab switches focus in two-panel mode. d never changes layout or focus.\nAll stays pinned. Both panels describe the current path; filters persist.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. q exits without deleting marks.\nEsc closes this panel.".to_owned()
             } else if self.tree.errors.is_empty() {
                 "No scan errors.".to_owned()
             } else {
@@ -1396,7 +1461,12 @@ impl App {
                     .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(Block::default().borders(Borders::ALL).title(format!(
-                " {} shown / {} eligible entries ",
+                " {} · {} shown / {} eligible entries ",
+                if self.show_files {
+                    "Files + directories"
+                } else {
+                    "Directories only"
+                },
                 self.rows.len(),
                 self.row_total
             )))
@@ -1462,9 +1532,9 @@ impl App {
         let keys = if self.editing_search {
             "Enter navigate  Esc clear search  Backspace edit"
         } else if self.view == View::Directories {
-            "↑↓ select  → open  ← parent  / search  r refresh  z zeros  g/u owners  ? help"
+            "↑↓ select  → open  ← parent  / search  g/u owners  r refresh  ? help  q quit"
         } else if self.directory_focus {
-            "↑↓ select  → open  ← parent  Tab owners  / search  r refresh  z zeros  d files"
+            "↑↓ select  → open  ← parent  Tab owners  / search  Space mark  r refresh"
         } else {
             "↑↓ preview  Home All  → directories  Tab focus  / search  r refresh  z zeros"
         };
@@ -1480,7 +1550,24 @@ impl App {
             keys
         );
         frame.render_widget(
-            Paragraph::new(status).block(Block::default().borders(Borders::ALL)),
+            Paragraph::new(status).block(Block::default().borders(Borders::ALL).title(format!(
+                " v: {} panel{} | d: {} ",
+                if self.view == View::Directories {
+                    "two"
+                } else {
+                    "single"
+                },
+                if self.view == View::Directories {
+                    "s"
+                } else {
+                    ""
+                },
+                if self.show_files {
+                    "directories only"
+                } else {
+                    "show files"
+                }
+            ))),
             areas[2],
         );
     }
@@ -1664,7 +1751,7 @@ pub fn run(
                     };
                     if !live_changed {
                         app.live_directory_anchor = app.preview_filter().and_then(|filter| {
-                            app.subdirectories(filter)
+                            app.browser_entries(filter)
                                 .get(app.directory_selected)
                                 .map(|r| r.item)
                         });
@@ -1916,6 +2003,154 @@ mod tests {
     }
 
     #[test]
+    fn layout_and_file_visibility_preserve_browser_navigation_and_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("outer/inner")).unwrap();
+        for i in 0..50 {
+            std::fs::create_dir(dir.path().join(format!("outer/inner/dir{i:02}"))).unwrap();
+        }
+        std::fs::write(dir.path().join("outer/inner/data"), [1; 8192]).unwrap();
+        let options = ScanOptions {
+            path: dir.path().into(),
+            threads: 1,
+            one_file_system: false,
+            excludes: vec![],
+        };
+        let tree = scan(options.clone(), Arc::default()).unwrap();
+        let uid = tree.nodes[0].uid;
+        let mut app = App::new(
+            tree,
+            Filter {
+                uid: Some(uid),
+                gid: None,
+            },
+            View::Users,
+            false,
+        );
+        press(&mut app, KeyCode::Right);
+        for name in ["outer/", "inner/"] {
+            app.directory_selected = app
+                .browser_entries(app.filter)
+                .iter()
+                .position(|e| e.name == name)
+                .unwrap();
+            press(&mut app, KeyCode::Enter);
+        }
+        let path = app.tree.path(app.current);
+        assert_eq!(app.current, app.owner_scope);
+        assert_eq!(
+            app.rows[app.selected].usage,
+            app.tree.nodes[app.current].usage(app.filter)
+        );
+        press(&mut app, KeyCode::End);
+        screen(&mut app, 140, 20);
+        let cursor = app.browser_cursor();
+        assert!(cursor.1 > 0);
+        let selected = app.browser_entries(app.filter)[cursor.0].item;
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.view, View::Directories);
+        assert_eq!(app.browser_cursor(), cursor);
+        assert_eq!(app.rows[app.selected].item, selected);
+        assert!(screen(&mut app, 140, 20).contains("v: two panels"));
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.view, View::Users);
+        assert!(app.directory_focus);
+        assert_eq!(app.browser_cursor(), cursor);
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.view, View::Users);
+        assert!(app.directory_focus && app.show_files);
+        assert_eq!(app.tree.path(app.current), path);
+        assert_eq!(
+            app.browser_entries(app.filter)[app.directory_selected].item,
+            selected
+        );
+        app.directory_selected = app
+            .browser_entries(app.filter)
+            .iter()
+            .position(|e| e.name == "data")
+            .unwrap();
+        press(&mut app, KeyCode::Enter); // a regular file never becomes the current directory
+        assert_eq!(app.tree.path(app.current), path);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.marks.len(), 1);
+        press(&mut app, KeyCode::Home);
+        assert!(screen(&mut app, 160, 30).contains("[x] data"));
+        // Reopening the owner selector does not establish a new navigation boundary.
+        let cursor = app.browser_cursor();
+        press(&mut app, KeyCode::Char('u'));
+        assert!(!app.directory_focus);
+        assert_eq!(app.browser_cursor(), cursor);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.tree.path(app.current), path.parent().unwrap());
+        assert!(app.directory_focus);
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.current, 0);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.current, 0);
+        assert!(app.directory_focus);
+        assert_eq!(app.filter.uid, Some(uid));
+        assert_eq!(app.marks.len(), 1);
+        assert_eq!(app.owner_scope, app.current);
+        let marks = std::mem::take(&mut app.marks).into_values().collect();
+        let outcome = deletion::execute(marks, &Progress::default());
+        assert_eq!(outcome.deleted, 1);
+        let previous = app.tree.path(app.current);
+        app.finish_deletion(outcome, scan(options, Arc::default()), previous.clone());
+        assert_eq!(app.view, View::Users);
+        assert!(app.directory_focus && app.show_files);
+        assert_eq!(app.tree.path(app.current), previous);
+    }
+
+    #[test]
+    fn layout_toggles_keep_search_and_d_does_not_move_owner_focus() {
+        let mut app = fixture_app();
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.directory_focus && app.show_files);
+        assert_eq!(app.view, View::Users);
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Tab);
+        type_search(&mut app, "file");
+        let filter = app.filter;
+        let entries: Vec<_> = app.browser_entries(filter).iter().map(|e| e.item).collect();
+        press(&mut app, KeyCode::End);
+        let selected = app.directory_selected;
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('v'));
+            assert_eq!(app.rows.iter().map(|e| e.item).collect::<Vec<_>>(), entries);
+            assert_eq!(app.selected, selected);
+            press(&mut app, KeyCode::Char('v'));
+            assert!(app.directory_focus);
+            assert_eq!(app.directory_selected, selected);
+            assert_eq!(app.directory_search, "file");
+            assert_eq!(app.filter, filter);
+        }
+        press(&mut app, KeyCode::Esc); // search only
+        assert_eq!(app.view, View::Users);
+        assert!(app.directory_focus);
+        press(&mut app, KeyCode::Esc); // filters only
+        assert_eq!(app.view, View::Users);
+        assert!(app.directory_focus && app.filter.is_empty());
+        // A selected owner remains explicit with no matches under a child.
+        app.filter.uid = Some(99999);
+        app.rebuild();
+        app.selected = app
+            .rows
+            .iter()
+            .position(|e| e.item == Item::Owner(99999))
+            .unwrap();
+        app.directory_search.clear();
+        app.directory_selected = app
+            .browser_entries(app.filter)
+            .iter()
+            .position(|e| e.name == "alpha/")
+            .unwrap();
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.preview_filter().unwrap().uid, Some(99999));
+        assert!(app.rows[app.selected].name.contains("no matching entries"));
+    }
+
+    #[test]
     fn all_owners_is_pinned_and_clears_only_its_dimension() {
         let mut app = fixture_app();
         assert_eq!(app.rows[app.selected].item, Item::Owner(3));
@@ -1958,6 +2193,9 @@ mod tests {
             }
         );
         press(&mut app, KeyCode::Tab);
+        assert_eq!(app.view, View::Groups);
+        assert!(app.directory_focus);
+        press(&mut app, KeyCode::Char('v'));
         assert_eq!(app.view, View::Directories);
     }
 
@@ -1974,7 +2212,7 @@ mod tests {
         assert!(text.contains("User: Alice (3) | Group: Research (50)"));
         press(&mut app, KeyCode::Right);
         type_search(&mut app, "BETA");
-        let entries = app.subdirectories(app.preview_filter().unwrap());
+        let entries = app.browser_entries(app.preview_filter().unwrap());
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "beta/");
         press(&mut app, KeyCode::Char('?'));
@@ -1997,6 +2235,8 @@ mod tests {
         assert!(app.filter.uid.is_some());
         press(&mut app, KeyCode::Esc);
         assert!(app.filter.is_empty());
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('v'));
         type_search(&mut app, "file03");
         assert_eq!(app.rows.len(), 1);
         assert_eq!(app.rows[0].name, "file03");
@@ -2068,16 +2308,16 @@ mod tests {
         let mut app = fixture_app();
         let filter = app.filter;
         press(&mut app, KeyCode::Right);
-        let before = app.subdirectories(filter).len();
+        let before = app.browser_entries(filter).len();
         assert!(before > 0);
         press(&mut app, KeyCode::Char('z'));
-        assert!(app.subdirectories(filter).is_empty());
+        assert!(app.browser_entries(filter).is_empty());
         app.scanning = true;
         for node in &mut app.tree.nodes {
             node.scan.own_pending = node.is_dir;
         }
         app.tree.aggregate();
-        assert_eq!(app.subdirectories(filter).len(), before);
+        assert_eq!(app.browser_entries(filter).len(), before);
         press(&mut app, KeyCode::Char('r'));
         assert!(!app.refresh_requested);
         app.scanning = false;
@@ -2212,7 +2452,7 @@ mod tests {
         app.focus_directories();
         let b = app.tree.nodes.iter().position(|n| n.name == "b").unwrap();
         app.directory_selected = app
-            .subdirectories(app.filter)
+            .browser_entries(app.filter)
             .iter()
             .position(|r| r.item == Item::Node(b))
             .unwrap();
@@ -2226,7 +2466,7 @@ mod tests {
         );
         app.refresh_scan(None);
         assert_eq!(
-            app.subdirectories(app.filter)[app.directory_selected].item,
+            app.browser_entries(app.filter)[app.directory_selected].item,
             Item::Node(b)
         );
         assert_eq!(app.directory_selected, 0);
@@ -2435,7 +2675,10 @@ mod tests {
         app.key(press(KeyCode::Left));
         assert_eq!(app.current, 0);
         assert_eq!(app.directory_selected, selected);
-        app.key(press(KeyCode::Left)); // at the starting path: focus owners
+        app.key(press(KeyCode::Left)); // at root: stay in the browser
+        assert!(app.directory_focus);
+        assert_eq!(app.current, 0);
+        app.key(press(KeyCode::Tab));
         assert!(!app.directory_focus);
         app.key(press(KeyCode::Tab));
         assert!(app.directory_focus);
@@ -2482,6 +2725,7 @@ mod tests {
         tree.aggregate();
         let mut app = App::new(tree, Filter::default(), View::Directories, false);
         let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.show_files = false;
         for (key, owner) in [('g', 10), ('u', 101)] {
             app.key(press(KeyCode::Esc));
             app.key(press(KeyCode::Char(key)));
@@ -2490,7 +2734,7 @@ mod tests {
                 .iter()
                 .position(|row| row.item == Item::Owner(owner))
                 .unwrap();
-            let preview = app.subdirectories(app.preview_filter().unwrap());
+            let preview = app.browser_entries(app.preview_filter().unwrap());
             assert_eq!(preview.len(), 2);
             assert_eq!(
                 (preview[0].name.as_str(), preview[0].usage.allocated),
@@ -2515,7 +2759,7 @@ mod tests {
             assert_ne!(app.view, View::Directories);
             assert!(app.directory_focus);
             assert!(
-                app.subdirectories(app.filter)
+                app.browser_entries(app.filter)
                     .iter()
                     .any(|row| row.name == "beta/" && row.usage.allocated == 0)
             );
@@ -2574,6 +2818,9 @@ mod tests {
         assert_eq!(app.view, View::Groups);
         assert!(app.directory_focus);
         app.key(press(KeyCode::Char('d')));
+        assert_eq!(app.view, View::Groups);
+        assert!(app.directory_focus);
+        app.key(press(KeyCode::Char('v')));
         assert_eq!(app.view, View::Directories);
         app.key(press(KeyCode::Esc));
         assert!(app.filter.is_empty());

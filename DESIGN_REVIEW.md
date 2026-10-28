@@ -46,3 +46,9 @@ Remaining medium-priority suggestions:
 - Further separate rendering from navigation/filter state. The new scan-session module and explicit completeness/overlay types establish boundaries without a large unrelated rewrite.
 
 Unvalidated environments remain documented in README/PERFORMANCE: real network shares, cold-cache performance and some filesystem-specific behavior. These are validation limits, not evidence of a currently observed high-priority defect.
+
+## Follow-up — independent layout, file visibility and navigation
+
+User testing exposed a navigation gap: `d` collapsed the layout, and reopening the owner picker created a parent-navigation boundary. The revised interface uses `v` for single/two-panel layout and `d` only for file visibility. Left/Backspace in the browser always goes to the parent, stopping at the scan root; Tab changes focus. `u`/`g` restores two panels and focuses the selected owner tab without changing the browser path, cursor, scroll or file visibility. Both panels describe the current directory. Esc clears search/filters without changing layout. Marking and deletion work in the two-panel file browser.
+
+The default startup is two panels with Users; `--view directories` remains an explicit single-panel startup. Regression coverage checks layout round trips, scrolling, search/filter retention, root-boundary behavior, absent owners, and two-panel marking/deletion. Validation: 47 Rust tests, Clippy/format checks, and 12 real-terminal sessions including the new default layout workflow.

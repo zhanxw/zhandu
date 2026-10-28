@@ -39,7 +39,7 @@ restored = termios.tcgetattr(0) == original
 os.write(1, b'ZHANDU_TERMINAL_RESTORED=' + str(restored).encode() + b'\\n')
 sys.exit(code)
 """
-    proc = subprocess.Popen([sys.executable, "-c", wrapper, binary, "--numeric-ids", *(["--cache-db", str(cache_db)] if cache_db else ["--no-cache"]), str(path)], stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=child_session)
+    proc = subprocess.Popen([sys.executable, "-c", wrapper, binary, "--numeric-ids", *([] if action == "layout" else ["--view", "directories"]), *(["--cache-db", str(cache_db)] if cache_db else ["--no-cache"]), str(path)], stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=child_session)
     captured = bytearray()
 
     def pump(timeout=0.05):
@@ -72,6 +72,23 @@ sys.exit(code)
             end = time.monotonic() + 0.3
             while time.monotonic() < end:
                 pump(0.02)
+            os.write(master, b"q")
+        elif action == "layout":
+            wait_for(b"complete.")
+            # Default startup is the Users + browser layout. Reveal and mark a
+            # file without collapsing the panels, then exercise v and parent navigation.
+            for key in [b"\x1b[C", b"\x1b[C", b"d", b"\x1b[H", b" "]:
+                os.write(master, key)
+                end = time.monotonic() + 0.15
+                while time.monotonic() < end:
+                    pump(0.02)
+            wait_for(b"marked;")
+            for key in [b"v", b"v", b"\x1b[D", b"u", b"\x1b[C", b"\x1b[D"]:
+                os.write(master, key)
+                end = time.monotonic() + 0.15
+                while time.monotonic() < end:
+                    pump(0.02)
+            assert (path / "nested" / "data").exists()
             os.write(master, b"q")
         elif action == "delete":
             wait_for(b"complete.")
@@ -128,7 +145,7 @@ sys.exit(code)
             os.write(master, b"\r\x1b")  # finish typing, clear search
             for _ in range(5):
                 pump()
-            os.write(master, b"d/nested")
+            os.write(master, b"v/nested")
             for _ in range(5):
                 pump()
             assert proc.poll() is None
@@ -169,6 +186,7 @@ with tempfile.TemporaryDirectory(prefix="zhandu-pty-") as tmp:
     (root / "nested").mkdir()
     (root / "nested" / "data").write_bytes(b"z" * 8192)
     session(root, "browse", 0)
+    session(root, "layout", 0)
     session(root, "search", 0)
     session(root, "refresh", 0)
     (root / "failure").mkdir()
