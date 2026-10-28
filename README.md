@@ -121,6 +121,7 @@ Use the release build for performance measurements. The first dependency downloa
 | e | Inspect scan errors; up/down scroll |
 | i | Inspect selected path, ownership, sizes, status, and marking eligibility; Esc returns |
 | ? | Help |
+| Shift+C | Toggle size colors (on by default): yellow ≥1 GiB, red ≥100 GiB; uses allocated/apparent size mode |
 | q | Close help/error/details when open; otherwise quit the browser |
 | Ctrl-C | Cancel / interrupt |
 

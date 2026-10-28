@@ -85,6 +85,7 @@ pub struct App {
     refresh_requested: bool,
     refresh_error: Option<String>,
     hide_zero: bool,
+    size_colors: bool,
     live_directory_anchor: Option<Item>,
     owner_search: String,
     directory_search: String,
@@ -133,6 +134,7 @@ impl App {
             refresh_requested: false,
             refresh_error: None,
             hide_zero: false,
+            size_colors: true,
             live_directory_anchor: None,
             owner_search: String::new(),
             directory_search: String::new(),
@@ -500,6 +502,18 @@ impl App {
         true
     }
 
+    fn size_cell(&self, entry: &Entry) -> Cell<'static> {
+        let bytes = entry.usage.bytes(self.apparent);
+        let style = if !self.size_colors || bytes < 1 << 30 {
+            Style::default()
+        } else if bytes < 100 * (1 << 30) {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        };
+        Cell::from(self.usage_label(entry.item, entry.usage)).style(style)
+    }
+
     fn draw_owner_picker(&mut self, frame: &mut Frame, area: Rect) {
         let panes = if area.width >= 100 {
             Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area)
@@ -530,10 +544,7 @@ impl App {
         };
         let rows = visible.iter().map(|&index| {
             let entry = &self.rows[index];
-            Row::new([
-                self.usage_label(entry.item, entry.usage),
-                entry.name.clone(),
-            ])
+            Row::new([self.size_cell(entry), Cell::from(entry.name.clone())])
         });
         let table = Table::new(rows, [Constraint::Length(13), Constraint::Min(12)])
             .header(
@@ -589,9 +600,9 @@ impl App {
                 .take(height)
                 .map(|entry| {
                     Row::new([
-                        self.usage_label(entry.item, entry.usage),
-                        self.status_label(entry.item),
-                        format!("{}{}", if matches!(entry.item, Item::Node(id) if self.marks.contains_key(&self.tree.path(id))) { "[x] " } else if self.show_files { "    " } else { "" }, entry.name),
+                        self.size_cell(entry),
+                        Cell::from(self.status_label(entry.item)),
+                        Cell::from(format!("{}{}", if matches!(entry.item, Item::Node(id) if self.marks.contains_key(&self.tree.path(id))) { "[x] " } else if self.show_files { "    " } else { "" }, entry.name)),
                     ])
                 });
             let selected = &self.rows[self.selected].name;
@@ -1167,6 +1178,13 @@ impl App {
                     self.notice = "Refresh already running".into();
                 }
             }
+            KeyCode::Char('C') => {
+                self.size_colors = !self.size_colors;
+                self.notice = format!(
+                    "Size colors {} (Shift+C): yellow ≥1 GiB; red ≥100 GiB",
+                    if self.size_colors { "on" } else { "off" }
+                );
+            }
             KeyCode::Char('z') => {
                 self.hide_zero = !self.hide_zero;
                 changed = true;
@@ -1401,7 +1419,7 @@ impl App {
             let text = if matches!(overlay, Overlay::Details) {
                 self.details.clone()
             } else if matches!(overlay, Overlay::Help) {
-                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng/u: focus Groups/Users   d: toggle files   v: toggle one/two panels   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: close panel / quit browser\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nBrowser: →/Enter opens directories; ←/Backspace always goes up (root stops).\nTab switches focus in two-panel mode. d never changes layout or focus.\nAll stays pinned. Both panels describe the current path; filters persist.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. In the browser, q exits without deleting marks.\nq or Esc closes this panel.".to_owned()
+                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng/u: focus Groups/Users   d: toggle files   v: toggle one/two panels   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nShift+C: toggle size colors (yellow >=1 GiB; red >=100 GiB)\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: close panel / quit browser\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nBrowser: →/Enter opens directories; ←/Backspace always goes up (root stops).\nTab switches focus in two-panel mode. d never changes layout or focus.\nAll stays pinned. Both panels describe the current path; filters persist.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. In the browser, q exits without deleting marks.\nq or Esc closes this panel.".to_owned()
             } else if self.tree.errors.is_empty() {
                 "No scan errors.".to_owned()
             } else {
@@ -1449,7 +1467,7 @@ impl App {
                         bytes as f64 / total as f64 * 100.0
                     };
                     Row::new(vec![
-                        Cell::from(self.usage_label(entry.item, entry.usage)),
+                        self.size_cell(entry),
                         Cell::from(if self.scanning || self.uncertain_usage(Item::Node(self.current)) { "…".into() } else { format!("{percent:5.1}%") }),
                         Cell::from(entry.usage.inodes.to_string()),
                         Cell::from(self.status_label(entry.item)),
@@ -1563,7 +1581,7 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(status).block(Block::default().borders(Borders::ALL).title(format!(
-                " v: {} panel{} | d: {} ",
+                " v: {} panel{} | d: {} | Shift+C: colors {} ",
                 if self.view == View::Directories {
                     "two"
                 } else {
@@ -1578,7 +1596,8 @@ impl App {
                     "directories only"
                 } else {
                     "show files"
-                }
+                },
+                if self.size_colors { "on" } else { "off" }
             ))),
             areas[2],
         );
@@ -2012,6 +2031,83 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn size_colors_follow_thresholds_metric_and_toggle_without_changing_navigation() {
+        let mut app = fixture_app();
+        let filter = app.filter;
+        let current = app.current;
+        for (bytes, expected) in [
+            (0, Color::Reset),
+            ((1 << 30) - 1, Color::Reset),
+            (1 << 30, Color::Yellow),
+            (100 * (1 << 30) - 1, Color::Yellow),
+            (100 * (1 << 30), Color::Red),
+            (u64::MAX, Color::Red),
+        ] {
+            let entry = Entry {
+                item: Item::SelfUsage,
+                name: "large".into(),
+                usage: Usage {
+                    allocated: bytes,
+                    apparent: 0,
+                    inodes: 1,
+                },
+            };
+            let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+            terminal
+                .draw(|f| {
+                    f.render_widget(
+                        Table::new([Row::new([app.size_cell(&entry)])], [Constraint::Min(1)]),
+                        f.area(),
+                    )
+                })
+                .unwrap();
+            assert_eq!(terminal.backend().buffer()[(0, 0)].fg, expected);
+        }
+        app.view = View::Directories;
+        app.rebuild();
+        app.rows[0].usage.allocated = 100 * (1 << 30);
+        app.rows[0].usage.apparent = 1 << 30;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|c| c.fg == Color::Red)
+        );
+        app.apparent = true;
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|c| c.fg == Color::Yellow)
+        );
+        press(&mut app, KeyCode::Char('C'));
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(
+            !terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|c| matches!(c.fg, Color::Red | Color::Yellow))
+        );
+        assert_eq!(app.filter, filter);
+        assert_eq!(app.current, current);
+        press(&mut app, KeyCode::Char('u'));
+        assert!(!app.size_colors);
+        press(&mut app, KeyCode::Char('C'));
+        assert!(app.size_colors);
+        type_search(&mut app, "C");
+        assert!(app.size_colors, "typing in search must not toggle colors");
     }
 
     #[test]
