@@ -37,6 +37,14 @@ For a local source build, the executable is `target/release/zhandu` (`target/rel
 
 Use the binary's absolute path from another directory to scan that directory, or install it on your PATH with `cargo install --path . --locked` from this project. No global installation was performed during development.
 
+## Live scan results
+
+The TUI opens as soon as the scan root is ready. Files, directory sizes, user/group totals, and errors update as metadata batches arrive, with screen refreshes up to five times per second. Browse and change filters while scanning; the current path and selected entry are preserved when sorting or finalizing results.
+
+`Scanning - PARTIAL` means unvisited contents are not counted yet. Zero currently means no matching usage discovered, not necessarily an empty directory. Hard links count once, but which directory receives their usage can change when the final deterministic scan replaces the preview. Marking/deletion becomes available only after scanning finishes. `q` or Ctrl-C cancels an active scan; Esc clears filters while browsing.
+
+Live results use a bounded update queue and an additional partial tree; memory still grows with the number of entries. JSON remains a single final report. This streams the current scan; it does not watch for later filesystem changes.
+
 ## Mark and delete files
 
 Open the full file listing with `d` (preserves the selected owner filter). Use **Space** to toggle a file's `[x]` mark and advance the cursor. Marks persist across directories and filter changes; the status line shows their count and estimated reclaimable allocated bytes. `c` clears all marks.

@@ -1,11 +1,11 @@
-**zhandu v0.2.0** adds a reviewed, file-only deletion workflow.
+**zhandu v0.3.0** shows live, browsable scan results.
 
-- **Space** marks/unmarks the highlighted regular file and advances; **d** still opens the file listing.
-- Visible `[x]` marks persist across navigation; the status shows marked count and estimated reclaimable space.
-- **x** reviews all marked paths; type **DELETE** and Enter to permanently delete, or Esc to cancel. **c** clears marks.
-- Directories, symlinks and special files cannot be marked; owner filtering never implies recursive deletion.
-- Changed files/parents are skipped; failures are reported. A background rescan refreshes totals after deletion.
-- Space estimates account for hard links; actual free space can differ due to open files, snapshots and shared blocks.
+- Open the TUI as soon as the scan root is ready; entries, sizes, owners and errors arrive in batches.
+- Refresh partial results up to five times per second while retaining directory and selection across updates.
+- Browse subdirectories and filter by user/group during scanning.
+- Clearly label provisional totals; reconcile with the final deterministic hard-link accounting.
+- Keep marking/deletion disabled until scanning completes. JSON remains a final report.
+- Use a bounded update queue; retain an additional partial tree while scanning.
 - Install/update with `cargo install zhandu --locked`.
 
 ## Downloads

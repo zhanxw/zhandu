@@ -71,6 +71,7 @@ struct Context<'a> {
     progress: &'a Progress,
     root_device: u64,
     next_directory: AtomicUsize,
+    live: Option<&'a SyncSender<LiveEvent>>,
 }
 
 /// Enumerate one directory, then distribute its metadata reads across the same
@@ -117,7 +118,7 @@ fn read_directory(path: &PathBuf, id: usize, context: &Context<'_>) -> Directory
     let mut entries: Vec<_> = names.into_iter().map(|name| (name, None)).collect();
     let inspect = |chunk: &mut [(OsString, Option<io::Result<EntryMetadata>>)]| {
         let mut inspected = 0;
-        for (name, result) in chunk {
+        for (name, result) in chunk.iter_mut() {
             if context.progress.is_cancelled() {
                 break;
             }
@@ -128,6 +129,29 @@ fn read_directory(path: &PathBuf, id: usize, context: &Context<'_>) -> Directory
             .progress
             .entries
             .fetch_add(inspected, Ordering::Relaxed);
+        if let Some(sender) = context.live {
+            let entries = chunk
+                .iter()
+                .filter_map(|(name, result)| {
+                    let Some(Ok(metadata)) = result else {
+                        return None;
+                    };
+                    if context.options.one_file_system && metadata.dev != context.root_device {
+                        return None;
+                    }
+                    Some((name.clone(), metadata.clone()))
+                })
+                .collect();
+            if sender
+                .send(LiveEvent::Entries {
+                    parent: path.clone(),
+                    entries,
+                })
+                .is_err()
+            {
+                context.progress.cancel();
+            }
+        }
     };
     if parallel {
         entries.par_chunks_mut(METADATA_BATCH).for_each(inspect);
@@ -164,6 +188,12 @@ fn read_directory(path: &PathBuf, id: usize, context: &Context<'_>) -> Directory
         .progress
         .errors
         .fetch_add(batch.error_count, Ordering::Relaxed);
+    if batch.error_count > 0
+        && let Some(sender) = context.live
+    {
+        let _ = sender.send(LiveEvent::Errors(batch.error_count, batch.errors.clone()));
+    }
+
     batch
 }
 
@@ -245,6 +275,22 @@ fn cancelled() -> io::Error {
 }
 
 pub fn scan(options: ScanOptions, progress: Arc<Progress>) -> io::Result<Tree> {
+    scan_inner(options, progress, None)
+}
+
+pub(crate) fn scan_live(
+    options: ScanOptions,
+    progress: Arc<Progress>,
+    sender: SyncSender<LiveEvent>,
+) -> io::Result<Tree> {
+    scan_inner(options, progress, Some(&sender))
+}
+
+fn scan_inner(
+    options: ScanOptions,
+    progress: Arc<Progress>,
+    live: Option<&SyncSender<LiveEvent>>,
+) -> io::Result<Tree> {
     let start = Instant::now();
     let root = fs::canonicalize(&options.path)?;
     let root_metadata = read_metadata(&root)?;
@@ -269,6 +315,7 @@ pub fn scan(options: ScanOptions, progress: Arc<Progress>) -> io::Result<Tree> {
         progress: &progress,
         root_device: root_metadata.dev,
         next_directory: AtomicUsize::new(1),
+        live,
     };
     let mut tree = Tree {
         root: root.clone(),
@@ -277,6 +324,11 @@ pub fn scan(options: ScanOptions, progress: Arc<Progress>) -> io::Result<Tree> {
         error_count: 0,
         elapsed_seconds: 0.0,
     };
+    if let Some(sender) = live {
+        sender
+            .send(LiveEvent::Root(root.clone(), root_metadata.clone()))
+            .map_err(|_| cancelled())?;
+    }
     let mut records = Vec::new();
     if options.threads == 1 {
         // No pool or channel overhead when the caller requests serial scanning.
@@ -358,4 +410,155 @@ pub fn scan(options: ScanOptions, progress: Arc<Progress>) -> io::Result<Tree> {
     tree.elapsed_seconds = start.elapsed().as_secs_f64();
     progress.phase.store(2, Ordering::Relaxed);
     Ok(tree)
+}
+
+// The terminal receives bounded deltas, not whole-tree clones. A parent's entries
+// are sent before its child jobs can start, so directory IDs are available here.
+pub(crate) enum LiveEvent {
+    Root(PathBuf, EntryMetadata),
+    Entries {
+        parent: PathBuf,
+        entries: Vec<(OsString, EntryMetadata)>,
+    },
+    Errors(u64, Vec<String>),
+}
+
+#[derive(Default)]
+pub(crate) struct LiveState {
+    directories: HashMap<PathBuf, usize>,
+    hard_links: HashSet<(u64, u64)>,
+}
+
+impl LiveState {
+    pub fn start(root: PathBuf, metadata: EntryMetadata) -> (Tree, Self) {
+        let mut state = Self::default();
+        state.directories.insert(root.clone(), 0);
+        let name = root.file_name().unwrap_or(root.as_os_str()).to_os_string();
+        let mut tree = Tree {
+            root,
+            nodes: vec![],
+            errors: vec![],
+            error_count: 0,
+            elapsed_seconds: 0.0,
+        };
+        append_node(&mut tree, name, metadata, None, &mut state.hard_links);
+        tree.aggregate();
+        (tree, state)
+    }
+
+    pub fn apply(&mut self, tree: &mut Tree, event: LiveEvent) {
+        match event {
+            LiveEvent::Entries { parent, entries } => {
+                let parent_id = self.directories[&parent];
+                for (name, metadata) in entries {
+                    let path = metadata.is_dir.then(|| parent.join(&name));
+                    let id =
+                        append_node(tree, name, metadata, Some(parent_id), &mut self.hard_links);
+                    let node = &mut tree.nodes[id];
+                    let usage = node.own;
+                    let owner = (node.uid, node.gid);
+                    if let Some(path) = path {
+                        self.directories.insert(path, id);
+                        node.owners.insert(owner, usage);
+                    }
+                    // Update only ancestors, keeping all owner/filter views available.
+                    let mut ancestor = Some(parent_id);
+                    while let Some(id) = ancestor {
+                        let node = &mut tree.nodes[id];
+                        node.total.add(usage);
+                        node.owners.entry(owner).or_default().add(usage);
+                        ancestor = node.parent;
+                    }
+                }
+            }
+            LiveEvent::Errors(count, errors) => {
+                tree.error_count += count;
+                tree.errors.extend(
+                    errors
+                        .into_iter()
+                        .take(MAX_ERRORS.saturating_sub(tree.errors.len())),
+                );
+            }
+            LiveEvent::Root(..) => unreachable!("root is consumed before live updates"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    fn live_batches_arrive_before_completion_and_reconcile_with_final_results() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested/data"), [1; 4096]).unwrap();
+        for i in 0..512 {
+            fs::write(dir.path().join(format!("file-{i:04}")), [1; 16]).unwrap();
+        }
+        fs::write(dir.path().join("excluded"), b"excluded").unwrap();
+        for threads in [1, 4] {
+            let options = ScanOptions {
+                path: dir.path().into(),
+                threads,
+                one_file_system: true,
+                excludes: vec!["excluded".into()],
+            };
+            let expected = scan(options.clone(), Arc::default()).unwrap();
+            let progress = Arc::new(Progress::default());
+            let worker_progress = progress.clone();
+            // Backpressure makes the before-completion assertion independent of timing.
+            let (sender, receiver) = sync_channel(1);
+            let worker = std::thread::spawn(move || scan_live(options, worker_progress, sender));
+            let LiveEvent::Root(root, metadata) = receiver.recv().unwrap() else {
+                panic!("root first");
+            };
+            let (mut live, mut state) = LiveState::start(root, metadata);
+            state.apply(&mut live, receiver.recv().unwrap());
+            assert!(live.nodes.len() > 1);
+            assert!(live.nodes.len() < expected.nodes.len());
+            assert_eq!(progress.phase.load(Ordering::Relaxed), 0);
+            for event in receiver {
+                state.apply(&mut live, event);
+            }
+            let final_tree = worker.join().unwrap().unwrap();
+            assert_eq!(live.nodes[0].total, expected.nodes[0].total);
+            assert_eq!(final_tree.nodes[0].total, expected.nodes[0].total);
+            assert_eq!(live.nodes[0].owners, expected.nodes[0].owners);
+            assert_eq!(live.error_count, final_tree.error_count);
+            for id in 0..live.nodes.len() {
+                let path = live.path(id);
+                let final_id = (0..final_tree.nodes.len())
+                    .find(|&i| final_tree.path(i) == path)
+                    .unwrap();
+                assert_eq!(live.nodes[id].total, final_tree.nodes[final_id].total);
+                assert_eq!(live.nodes[id].owners, final_tree.nodes[final_id].owners);
+            }
+        }
+    }
+
+    #[test]
+    fn closing_live_receiver_cancels_blocked_scanner() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..256 {
+            fs::write(dir.path().join(format!("{i}")), b"data").unwrap();
+        }
+        let options = ScanOptions {
+            path: dir.path().into(),
+            threads: 4,
+            one_file_system: false,
+            excludes: vec![],
+        };
+        let progress = Arc::new(Progress::default());
+        let worker_progress = progress.clone();
+        let (sender, receiver) = sync_channel(1);
+        let worker = std::thread::spawn(move || scan_live(options, worker_progress, sender));
+        receiver.recv().unwrap();
+        drop(receiver);
+        assert_eq!(
+            worker.join().unwrap().unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(progress.is_cancelled());
+    }
 }

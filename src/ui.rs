@@ -1,7 +1,7 @@
 use crate::{
     deletion::{self, Mark, Outcome},
     model::{Filter, Tree, Usage, display_name, human},
-    scan::{Progress, ScanOptions, scan},
+    scan::{LiveEvent, LiveState, Progress, ScanOptions, scan, scan_live},
 };
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -73,6 +73,8 @@ pub struct App {
     delete_requested: bool,
     busy: bool,
     deletion_errors: bool,
+    scanning: bool,
+    live_directory_anchor: Option<Item>,
 }
 
 impl App {
@@ -102,6 +104,8 @@ impl App {
             delete_requested: false,
             busy: false,
             deletion_errors: false,
+            scanning: false,
+            live_directory_anchor: None,
         };
         app.rebuild();
         app
@@ -444,7 +448,88 @@ impl App {
         self.offset = self.offset.min(self.selected);
     }
 
+    fn refresh_scan(&mut self, finished: Option<Tree>) {
+        let selected = self.rows.get(self.selected).map(|r| r.item);
+        let directory = self.live_directory_anchor.take().or_else(|| {
+            self.preview_filter().and_then(|filter| {
+                self.subdirectories(filter)
+                    .get(self.directory_selected)
+                    .map(|r| r.item)
+            })
+        });
+        let mut target = selected;
+        let mut directory_target = directory;
+        if let Some(tree) = finished {
+            let current = self.tree.path(self.current);
+            let scope = self.tree.path(self.owner_scope);
+            let target_path = match selected {
+                Some(Item::Node(id)) => Some(self.tree.path(id)),
+                _ => None,
+            };
+            let directory_path = match directory {
+                Some(Item::Node(id)) => Some(self.tree.path(id)),
+                _ => None,
+            };
+            self.tree = tree;
+            self.current = 0;
+            self.owner_scope = 0;
+            for id in 0..self.tree.nodes.len() {
+                if self.tree.nodes[id].is_dir {
+                    let path = self.tree.path(id);
+                    if path == current {
+                        self.current = id;
+                    }
+                    if path == scope {
+                        self.owner_scope = id;
+                    }
+                }
+            }
+            target = match target_path {
+                Some(path) => self.tree.nodes[self.current]
+                    .children
+                    .iter()
+                    .find(|&&id| self.tree.path(id) == path)
+                    .copied()
+                    .map(Item::Node),
+                None => selected,
+            };
+            directory_target = directory_path.and_then(|path| {
+                self.tree.nodes[self.current]
+                    .children
+                    .iter()
+                    .find(|&&id| self.tree.path(id) == path)
+                    .copied()
+                    .map(Item::Node)
+            });
+            self.scanning = false;
+            self.notice = "Scan complete. Space marks files; x reviews deletion".into();
+        }
+        self.rebuild();
+        if let Some(target) = target
+            && let Some(index) = self.rows.iter().position(|r| r.item == target)
+        {
+            self.selected = index;
+        }
+        if let Some(target) = directory_target
+            && let Some(filter) = self.preview_filter()
+            && let Some(index) = self
+                .subdirectories(filter)
+                .iter()
+                .position(|r| r.item == target)
+        {
+            self.directory_selected = index;
+        }
+        self.offset = self.offset.min(self.selected);
+        self.directory_offset = self.directory_offset.min(self.directory_selected);
+    }
+
     fn toggle_mark(&mut self) {
+        if self.scanning {
+            self.notice =
+                "Scanning: file marking/deletion becomes available when results are complete"
+                    .into();
+            return;
+        }
         if self.view != View::Directories {
             self.notice = "Press d for the file listing, then Space to mark a file".into();
             return;
@@ -607,7 +692,10 @@ impl App {
                     return false;
                 }
                 KeyCode::Char('x') => {
-                    if self.marks.is_empty() {
+                    if self.scanning {
+                        self.notice =
+                            "Scanning: deletion is disabled until the scan finishes".into();
+                    } else if self.marks.is_empty() {
                         self.notice = "No files marked. Use Space on a file first".into();
                     } else {
                         self.review = Some(String::new());
@@ -823,14 +911,19 @@ impl App {
             ""
         };
         let title = format!(
-            " zhandu | {:?} | {}{} ",
+            " zhandu | {:?} | {}{}{} ",
             self.view,
             if self.apparent {
                 "apparent size"
             } else {
                 "allocated disk usage"
             },
-            incomplete
+            incomplete,
+            if self.scanning {
+                " | Scanning - PARTIAL"
+            } else {
+                ""
+            }
         );
         frame.render_widget(
             Paragraph::new(self.path.as_str())
@@ -972,18 +1065,23 @@ pub fn run(
         let root_label = display_name(options.path.as_os_str());
         let start = Instant::now();
         let (sender, receiver) = mpsc::channel();
+        let (live_tx, live_rx) = mpsc::sync_channel(32);
         let rescan_options = options.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
-            let result = scan(options, worker_progress);
+            let result = scan_live(options, worker_progress, live_tx);
             let _ = sender.send(result);
         });
-        let tree = loop {
+        let (tree, mut live_state, scanning) = loop {
             if progress.is_cancelled() {
                 return Ok(130);
             }
+            if let Ok(LiveEvent::Root(root, metadata)) = live_rx.try_recv() {
+                let (tree, state) = LiveState::start(root, metadata);
+                break (tree, Some(state), true);
+            }
             match receiver.try_recv() {
-                Ok(result) => break result?,
+                Ok(result) => break (result?, None, false),
                 Err(mpsc::TryRecvError::Disconnected) => {
                     return Err(io::Error::other("scanner stopped unexpectedly"));
                 }
@@ -991,11 +1089,11 @@ pub fn run(
             }
             terminal.draw(|frame| {
                 let phase = if progress.phase.load(Ordering::Relaxed) == 1 { "Aggregating ownership totals" } else { "Scanning" };
-                let text = format!("{phase}: {root_label}\n\n{} entries inspected | {} errors | {:.1}s\n\nResults will open when scanning finishes. q / Esc / Ctrl-C cancels.",
+                let text = format!("{phase}: {root_label}\n\n{} entries inspected | {} errors | {:.1}s\n\nOpening live results as entries arrive. q / Esc / Ctrl-C cancels.",
                     progress.entries.load(Ordering::Relaxed), progress.errors.load(Ordering::Relaxed), start.elapsed().as_secs_f64());
                 frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title(" zhandu ")), frame.area());
             })?;
-            if event::poll(Duration::from_millis(100))?
+            if event::poll(Duration::from_millis(10))?
                 && let Event::Key(key) = event::read()?
                 && key.kind != KeyEventKind::Release
                 && (matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
@@ -1007,11 +1105,12 @@ pub fn run(
             }
         };
         let (names_tx, names_rx) = mpsc::channel();
+        let (owner_tx, owner_rx) = mpsc::channel();
+        let mut requested_owners = std::collections::HashSet::new();
         if !numeric {
-            let ids: Vec<_> = tree.nodes[0].owners.keys().copied().collect();
             std::thread::spawn(move || {
                 let mut seen = std::collections::HashSet::new();
-                for (uid, gid) in ids {
+                for (uid, gid) in owner_rx {
                     for (group, id) in [(false, uid), (true, gid)] {
                         if !seen.insert((group, id)) {
                             continue;
@@ -1027,13 +1126,65 @@ pub fn run(
             });
         }
         let mut app = App::new(tree, filter, view, apparent);
+        app.scanning = scanning;
+        if !scanning {
+            app.notice = "Scan complete. Space marks files; x reviews deletion".into();
+        }
         let mut dirty = true;
+        let mut live_changed = false;
+        let mut last_refresh = Instant::now();
         let (delete_tx, delete_rx) = mpsc::channel();
         let mut deletion_worker = DeletionWorker {
             handle: None,
             progress: progress.clone(),
         };
         loop {
+            if app.scanning {
+                // Bound UI work per turn; render/sort at most five times per second.
+                let drain_start = Instant::now();
+                while drain_start.elapsed() < Duration::from_millis(10) {
+                    let Ok(event) = live_rx.try_recv() else {
+                        break;
+                    };
+                    if !live_changed {
+                        app.live_directory_anchor = app.preview_filter().and_then(|filter| {
+                            app.subdirectories(filter)
+                                .get(app.directory_selected)
+                                .map(|r| r.item)
+                        });
+                    }
+                    live_state.as_mut().unwrap().apply(&mut app.tree, event);
+                    live_changed = true;
+                }
+                match receiver.try_recv() {
+                    Ok(result) => {
+                        app.refresh_scan(Some(result?));
+                        live_state = None;
+                        live_changed = false;
+                        dirty = true;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err(io::Error::other("scanner stopped unexpectedly"));
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+                if app.scanning && last_refresh.elapsed() >= Duration::from_millis(200) {
+                    app.tree.elapsed_seconds = start.elapsed().as_secs_f64();
+                    if live_changed {
+                        app.refresh_scan(None);
+                        live_changed = false;
+                    }
+                    dirty = true;
+                    last_refresh = Instant::now();
+                }
+            }
+            if !numeric && !app.tree.nodes.is_empty() {
+                for &owner in app.tree.nodes[0].owners.keys() {
+                    if requested_owners.insert(owner) {
+                        let _ = owner_tx.send(owner);
+                    }
+                }
+            }
             if let Ok((outcome, scanned, previous)) = delete_rx.try_recv() {
                 if let Some(handle) = deletion_worker.handle.take() {
                     handle
@@ -1090,12 +1241,20 @@ pub fn run(
                 dirty = true;
             }
             if dirty {
+                if live_changed {
+                    app.refresh_scan(None);
+                    live_changed = false;
+                }
                 terminal.draw(|frame| app.draw(frame))?;
                 dirty = false;
             }
-            if event::poll(Duration::from_millis(100))? {
+            if event::poll(Duration::from_millis(if app.scanning { 1 } else { 100 }))? {
                 match event::read()? {
                     Event::Key(key) => {
+                        if live_changed {
+                            app.refresh_scan(None);
+                            live_changed = false;
+                        }
                         if key.kind != KeyEventKind::Release
                             && key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1106,6 +1265,10 @@ pub fn run(
                             }
                         }
                         if app.key(key) {
+                            if app.scanning {
+                                progress.cancel();
+                                return Ok(130);
+                            }
                             return Ok(if app.deletion_errors || app.tree.error_count > 0 {
                                 2
                             } else {
@@ -1126,6 +1289,118 @@ pub fn run(
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn live_owner_directory_cursor_stays_on_same_directory_after_resort() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a", "b"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        std::fs::write(dir.path().join("b/data"), [1; 8192]).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let metadata = crate::platform::read_metadata;
+        let (mut tree, mut state) = LiveState::start(root.clone(), metadata(&root).unwrap());
+        state.apply(
+            &mut tree,
+            LiveEvent::Entries {
+                parent: root.clone(),
+                entries: vec![
+                    ("a".into(), metadata(&root.join("a")).unwrap()),
+                    ("b".into(), metadata(&root.join("b")).unwrap()),
+                ],
+            },
+        );
+        let mut app = App::new(tree, Filter::default(), View::Groups, false);
+        app.scanning = true;
+        app.focus_directories();
+        let b = app.tree.nodes.iter().position(|n| n.name == "b").unwrap();
+        app.directory_selected = app
+            .subdirectories(app.filter)
+            .iter()
+            .position(|r| r.item == Item::Node(b))
+            .unwrap();
+        app.live_directory_anchor = Some(Item::Node(b));
+        state.apply(
+            &mut app.tree,
+            LiveEvent::Entries {
+                parent: root.join("b"),
+                entries: vec![("data".into(), metadata(&root.join("b/data")).unwrap())],
+            },
+        );
+        app.refresh_scan(None);
+        assert_eq!(
+            app.subdirectories(app.filter)[app.directory_selected].item,
+            Item::Node(b)
+        );
+        assert_eq!(app.directory_selected, 0);
+        assert!(app.directory_focus);
+    }
+
+    #[test]
+    fn live_refresh_preserves_paths_filters_and_disables_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a", "b"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+            std::fs::write(dir.path().join(name).join("data"), [3; 8192]).unwrap();
+        }
+        let root = dir.path().canonicalize().unwrap();
+        let metadata = crate::platform::read_metadata;
+        let (tree, mut state) = LiveState::start(root.clone(), metadata(&root).unwrap());
+        let mut app = App::new(tree, Filter::default(), View::Directories, false);
+        app.scanning = true;
+        state.apply(
+            &mut app.tree,
+            LiveEvent::Entries {
+                parent: root.clone(),
+                entries: vec![
+                    ("b".into(), metadata(&root.join("b")).unwrap()),
+                    ("a".into(), metadata(&root.join("a")).unwrap()),
+                ],
+            },
+        );
+        app.refresh_scan(None);
+        let b = app.tree.nodes.iter().position(|n| n.name == "b").unwrap();
+        app.selected = app
+            .rows
+            .iter()
+            .position(|r| r.item == Item::Node(b))
+            .unwrap();
+        app.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        state.apply(
+            &mut app.tree,
+            LiveEvent::Entries {
+                parent: root.join("b"),
+                entries: vec![("data".into(), metadata(&root.join("b/data")).unwrap())],
+            },
+        );
+        app.refresh_scan(None);
+        app.selected = app.rows.iter().position(|r| r.name == "data").unwrap();
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.marks.is_empty() && app.review.is_none());
+        app.filter.gid = Some(app.tree.nodes[b].gid);
+        let filter = app.filter;
+        let final_tree = scan(
+            ScanOptions {
+                path: root.clone(),
+                threads: 2,
+                one_file_system: false,
+                excludes: vec![],
+            },
+            Arc::default(),
+        )
+        .unwrap();
+        app.refresh_scan(Some(final_tree));
+        assert!(!app.scanning);
+        assert_eq!(app.tree.path(app.current), root.join("b"));
+        assert_eq!(app.filter, filter);
+        let Item::Node(selected) = app.rows[app.selected].item else {
+            panic!("file selected");
+        };
+        assert_eq!(app.tree.path(selected), root.join("b/data"));
+        app.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.marks.len(), 1);
+    }
 
     #[test]
     fn marking_review_confirmation_and_rescan() {

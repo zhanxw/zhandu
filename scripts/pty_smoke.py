@@ -58,7 +58,7 @@ sys.exit(code)
 
     try:
         if action == "browse":
-            wait_for(b"Inodes")
+            wait_for(b"complete.")
             # Focus and browse the directory pane for both groups and users,
             # return to owners, clear filters, then exercise the full directory view.
             for key in [b"g", b"\x1b[C", b"\x1b[B", b"\x1b[A", b"\r", b"\x1b[D", b"\t", b"u", b"\x1b[C", b"\r", b"\x1b[D", b"\t", b"\x1b", b"d", b"\x1b[B", b"\x1b[A", b"\x1b[C", b"\x1b[D", b"a", b"s", b"?", b"?"]:
@@ -73,8 +73,10 @@ sys.exit(code)
                 pump(0.02)
             os.write(master, b"q")
         elif action == "delete":
-            wait_for(b"Inodes")
-            os.write(master, b" ")
+            wait_for(b"complete.")
+            # Live results preserve the initially selected directory-self row.
+            # Home explicitly selects our largest (and only) regular file.
+            os.write(master, b"\x1b[H ")
             wait_for(b"marked;")
             os.write(master, b"x")
             wait_for(b"Confirm:")
@@ -85,7 +87,7 @@ sys.exit(code)
                 pump(0.02)
             assert (path / "delete-me").exists()
             os.write(master, b"xDELETE\r")
-            wait_for(b"result")
+            wait_for(b"failed/skipped.")
             assert not (path / "delete-me").exists()
             assert b"reclaimed:" in captured
             os.write(master, b"\rq")
@@ -93,7 +95,7 @@ sys.exit(code)
             wait_for(b"Scanning")
             os.write(master, b"\x03")
         elif action == "interrupt":
-            wait_for(b"Inodes")
+            wait_for(b"complete.")
             proc.send_signal(signal.SIGINT)
         deadline = time.monotonic() + 15
         while proc.poll() is None and time.monotonic() < deadline:
