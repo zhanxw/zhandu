@@ -45,6 +45,28 @@ The TUI opens as soon as the scan root is ready. Files, directory sizes, user/gr
 
 Live results use a bounded update queue and an additional partial tree; memory still grows with the number of entries. JSON remains a single final report. This streams the current scan; it does not watch for later filesystem changes.
 
+## Persistent scan cache
+
+Caching is enabled by default for the TUI. After a completed, error-free scan, zhandu saves a local SQLite snapshot. The next launch displays that snapshot with **CACHED - refreshing** and its age, then updates existing rows and adds newly discovered files while rescanning. Missing files and directories disappear when the complete fresh tree replaces the preview. Unvisited entries remain stale until then, so intermediate totals may mix cached and fresh data. Marking/deletion stays disabled throughout refresh.
+
+The background refresh still reads filesystem metadata: directory modification times alone cannot reliably detect changed file sizes, ownership or hard links. The cache improves time to useful results; it does not skip validation of cached files. JSON always scans fresh and does not read/write the cache. This is not a filesystem watcher or an interrupted-scan checkpoint.
+
+```sh
+zhandu /shared/project                       # load previous results and refresh
+zhandu /shared/project --no-cache            # neither read nor write a cache
+zhandu /shared/project --cache-db /path/to/private/scans.sqlite3
+```
+
+Default database locations:
+
+- macOS: `~/Library/Caches/zhandu/scans.sqlite3`
+- Linux: `$XDG_CACHE_HOME/zhandu/scans.sqlite3`, or `~/.cache/zhandu/scans.sqlite3`
+- Windows: `%LOCALAPPDATA%\zhandu\scans.sqlite3`
+
+Snapshots are keyed by canonical root path, root filesystem identity, `--exclude` settings and `--one-file-system`. User/group filters, sort order and worker count reuse the same snapshot. Raw filenames are preserved losslessly; Windows owners are stored as persistent SIDs. The 16 most recently saved root/configuration snapshots are retained. SQLite reuses freed pages; deleting the database while zhandu is closed resets the cache and reclaims its file space.
+
+Snapshot replacement is transactional. Interrupted or incomplete refreshes retain the previous good snapshot, and an older concurrent scan cannot overwrite a newer saved one. A successful rescan after deletion updates the cache too. Missing, corrupt, inaccessible, incompatible or busy caches fall back to live scanning with a status message; cache errors do not prevent browsing. On Unix, newly created cache directories use mode 0700 and databases use 0600; existing databases must be private and owned by the current user. Cached metadata includes file paths and ownership, but no file contents.
+
 ## Mark and delete files
 
 Open the full file listing with `d` (preserves the selected owner filter). Use **Space** to toggle a file's `[x]` mark and advance the cursor. Marks persist across directories and filter changes; the status line shows their count and estimated reclaimable allocated bytes. `c` clears all marks.
@@ -59,7 +81,7 @@ Space reclaimed is an **estimate**, based on current allocated bytes of successf
 
 ## Build
 
-Requires Rust 1.88 or newer. Native Windows (MSVC), Linux, and macOS builds are supported. Cargo.lock pins the dependency versions used for this build.
+Requires Rust 1.89 or newer. SQLite is bundled; no separate SQLite installation is required. Native Windows (MSVC), Linux, and macOS builds are supported. Cargo.lock pins the dependency versions used for this build.
 
 ```sh
 cargo build --release --locked
@@ -141,7 +163,7 @@ Reproduce with Python 3:
 python3 scripts/benchmark.py target/release/zhandu
 ```
 
-The script creates and removes its own temporary fixture, verifies totals against `du`, and saves timings and memory measurements to `benchmark-results/local.json`. It does not flush system caches. Memory grows with file count and directory/owner combinations; disk-backed indexing and scan caching are not implemented.
+The script creates and removes its own temporary fixture, verifies totals against `du`, and saves timings and memory measurements to `benchmark-results/local.json`. It does not flush system caches. Memory grows with file count and directory/owner combinations; the persistent cache accelerates access to previous results, but the live tree still resides in memory.
 
 ## Verification and platform status
 

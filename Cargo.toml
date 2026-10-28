@@ -1,8 +1,8 @@
 [package]
 name = "zhandu"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Fast terminal disk usage explorer with group and user accounting"
 repository = "https://github.com/zhanxw/zhandu"
 license = "MIT"
@@ -15,6 +15,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ctrlc = "3"
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 uzers = "0.12"

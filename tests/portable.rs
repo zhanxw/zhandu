@@ -44,6 +44,8 @@ fn native_cli_reports_usage_and_rejects_missing_roots() {
     fs::write(dir.path().join("data"), [1u8; 4096]).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_zhandu"))
         .arg("--json")
+        .arg("--cache-db")
+        .arg(dir.path().join("unused.sqlite3"))
         .arg(dir.path())
         .output()
         .unwrap();
@@ -51,6 +53,10 @@ fn native_cli_reports_usage_and_rejects_missing_roots() {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !dir.path().join("unused.sqlite3").exists(),
+        "JSON must bypass caching"
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["complete"], true);

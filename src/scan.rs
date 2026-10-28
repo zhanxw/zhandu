@@ -427,9 +427,105 @@ pub(crate) enum LiveEvent {
 pub(crate) struct LiveState {
     directories: HashMap<PathBuf, usize>,
     hard_links: HashSet<(u64, u64)>,
+    cached_index: Option<HashMap<(usize, OsString), usize>>,
+    cached_links: HashMap<(u64, u64), usize>,
 }
 
 impl LiveState {
+    pub fn from_cached(tree: &Tree) -> Self {
+        let mut state = Self {
+            cached_index: Some(HashMap::new()),
+            ..Self::default()
+        };
+        for (id, node) in tree.nodes.iter().enumerate() {
+            if node.is_dir {
+                state.directories.insert(tree.path(id), id);
+            } else if !node.shared_link {
+                state.cached_links.entry(node.identity).or_insert(id);
+            }
+            if let Some(parent) = node.parent {
+                state
+                    .cached_index
+                    .as_mut()
+                    .unwrap()
+                    .insert((parent, node.name.clone()), id);
+            }
+        }
+        state
+    }
+
+    // Merge fresh metadata into the cached preview. Unvisited rows remain visibly
+    // stale until the authoritative final tree removes missing entries.
+    fn update_cached(&mut self, tree: &mut Tree, id: usize, metadata: EntryMetadata) {
+        let node = &mut tree.nodes[id];
+        let keep_children = node.is_dir && metadata.is_dir;
+        let removed = if keep_children {
+            HashMap::from([((node.uid, node.gid), node.own)])
+        } else if node.is_dir {
+            node.owners.clone()
+        } else {
+            HashMap::from([((node.uid, node.gid), node.total)])
+        };
+        let shared = !metadata.is_dir
+            && metadata.nlink > 1
+            && *self
+                .cached_links
+                .entry((metadata.dev, metadata.ino))
+                .or_insert(id)
+                != id;
+        let own = if shared {
+            Usage::default()
+        } else {
+            metadata.usage
+        };
+        let added = HashMap::from([((metadata.uid, metadata.gid), own)]);
+        node.identity = (metadata.dev, metadata.ino);
+        node.uid = metadata.uid;
+        node.gid = metadata.gid;
+        node.is_dir = metadata.is_dir;
+        node.is_symlink = metadata.is_symlink;
+        node.shared_link = shared;
+        node.own = own;
+        fn adjust(
+            node: &mut Node,
+            removed: &HashMap<(u32, u32), Usage>,
+            added: &HashMap<(u32, u32), Usage>,
+        ) {
+            fn sub(value: &mut Usage, other: Usage) {
+                value.allocated = value.allocated.saturating_sub(other.allocated);
+                value.apparent = value.apparent.saturating_sub(other.apparent);
+                value.inodes = value.inodes.saturating_sub(other.inodes);
+            }
+            for (&owner, &usage) in removed {
+                sub(&mut node.total, usage);
+                if node.is_dir {
+                    sub(node.owners.entry(owner).or_default(), usage);
+                }
+            }
+            for (&owner, &usage) in added {
+                node.total.add(usage);
+                if node.is_dir {
+                    node.owners.entry(owner).or_default().add(usage);
+                }
+            }
+        }
+        if keep_children {
+            adjust(node, &removed, &added);
+        } else {
+            node.children.clear();
+            node.total = own;
+            node.owners.clear();
+            if node.is_dir {
+                node.owners = added.clone();
+            }
+        }
+        let mut parent = node.parent;
+        while let Some(id) = parent {
+            adjust(&mut tree.nodes[id], &removed, &added);
+            parent = tree.nodes[id].parent;
+        }
+    }
+
     pub fn start(root: PathBuf, metadata: EntryMetadata) -> (Tree, Self) {
         let mut state = Self::default();
         state.directories.insert(root.clone(), 0);
@@ -451,6 +547,33 @@ impl LiveState {
             LiveEvent::Entries { parent, entries } => {
                 let parent_id = self.directories[&parent];
                 for (name, metadata) in entries {
+                    if self.cached_index.is_some() {
+                        let key = (parent_id, name.clone());
+                        let id = match self.cached_index.as_ref().unwrap().get(&key).copied() {
+                            Some(id) => id,
+                            None => {
+                                // A zero-contribution placeholder lets the common update path
+                                // propagate the new entry exactly once.
+                                let mut placeholder = metadata.clone();
+                                placeholder.usage = Usage::default();
+                                let id = append_node(
+                                    tree,
+                                    name,
+                                    placeholder,
+                                    Some(parent_id),
+                                    &mut self.hard_links,
+                                );
+                                self.cached_index.as_mut().unwrap().insert(key, id);
+                                id
+                            }
+                        };
+                        if metadata.is_dir {
+                            self.directories
+                                .insert(parent.join(&tree.nodes[id].name), id);
+                        }
+                        self.update_cached(tree, id, metadata);
+                        continue;
+                    }
                     let path = metadata.is_dir.then(|| parent.join(&name));
                     let id =
                         append_node(tree, name, metadata, Some(parent_id), &mut self.hard_links);
@@ -479,7 +602,13 @@ impl LiveState {
                         .take(MAX_ERRORS.saturating_sub(tree.errors.len())),
                 );
             }
-            LiveEvent::Root(..) => unreachable!("root is consumed before live updates"),
+            LiveEvent::Root(_, metadata) => {
+                assert!(
+                    self.cached_index.is_some(),
+                    "root is consumed before fresh live updates"
+                );
+                self.update_cached(tree, 0, metadata);
+            }
         }
     }
 }
@@ -535,6 +664,62 @@ mod live_tests {
                 assert_eq!(live.nodes[id].owners, final_tree.nodes[final_id].owners);
             }
         }
+    }
+
+    #[test]
+    fn cached_preview_updates_existing_rows_and_final_scan_removes_missing_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("changed"), b"old").unwrap();
+        fs::write(dir.path().join("gone"), b"stale").unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested/data"), b"child").unwrap();
+        let options = ScanOptions {
+            path: dir.path().into(),
+            threads: 2,
+            one_file_system: false,
+            excludes: vec![],
+        };
+        let mut cached = scan(options.clone(), Arc::default()).unwrap();
+        let gone = cached.nodes.iter().find(|n| n.name == "gone").unwrap().own;
+        let mut state = LiveState::from_cached(&cached);
+        fs::write(dir.path().join("changed"), [1; 8192]).unwrap();
+        fs::remove_file(dir.path().join("gone")).unwrap();
+        fs::remove_file(dir.path().join("nested/data")).unwrap();
+        fs::remove_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested"), b"now a file").unwrap();
+        fs::write(dir.path().join("new"), b"new").unwrap();
+        let (sender, receiver) = sync_channel(1);
+        let worker = std::thread::spawn(move || scan_live(options, Arc::default(), sender));
+        for event in receiver {
+            state.apply(&mut cached, event);
+        }
+        let fresh = worker.join().unwrap().unwrap();
+        assert_eq!(
+            cached.nodes.iter().filter(|n| n.name == "changed").count(),
+            1
+        );
+        assert_eq!(
+            cached
+                .nodes
+                .iter()
+                .find(|n| n.name == "changed")
+                .unwrap()
+                .own
+                .apparent,
+            8192
+        );
+        let mut expected_preview = fresh.nodes[0].total;
+        expected_preview.add(gone);
+        assert_eq!(cached.nodes[0].total, expected_preview);
+        assert!(!fresh.nodes.iter().any(|n| n.name == "gone"));
+        assert!(
+            !cached
+                .nodes
+                .iter()
+                .find(|n| n.name == "nested")
+                .unwrap()
+                .is_dir
+        );
     }
 
     #[test]

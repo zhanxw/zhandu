@@ -1,4 +1,5 @@
 use crate::{
+    cache::{Cache, CacheConfig},
     deletion::{self, Mark, Outcome},
     model::{Filter, Tree, Usage, display_name, human},
     scan::{LiveEvent, LiveState, Progress, ScanOptions, scan, scan_live},
@@ -74,6 +75,7 @@ pub struct App {
     busy: bool,
     deletion_errors: bool,
     scanning: bool,
+    cached_refresh: bool,
     live_directory_anchor: Option<Item>,
 }
 
@@ -105,6 +107,7 @@ impl App {
             busy: false,
             deletion_errors: false,
             scanning: false,
+            cached_refresh: false,
             live_directory_anchor: None,
         };
         app.rebuild();
@@ -502,6 +505,7 @@ impl App {
                     .map(Item::Node)
             });
             self.scanning = false;
+            self.cached_refresh = false;
             self.notice = "Scan complete. Space marks files; x reviews deletion".into();
         }
         self.rebuild();
@@ -919,7 +923,9 @@ impl App {
                 "allocated disk usage"
             },
             incomplete,
-            if self.scanning {
+            if self.cached_refresh {
+                " | CACHED - refreshing"
+            } else if self.scanning {
                 " | Scanning - PARTIAL"
             } else {
                 ""
@@ -1059,6 +1065,7 @@ pub fn run(
     view: View,
     apparent: bool,
     numeric: bool,
+    cache_config: CacheConfig,
 ) -> io::Result<i32> {
     // Ratatui's guard restores terminal modes on return, errors, and panics.
     ratatui::run(|terminal| -> io::Result<i32> {
@@ -1066,29 +1073,82 @@ pub fn run(
         let start = Instant::now();
         let (sender, receiver) = mpsc::channel();
         let (live_tx, live_rx) = mpsc::sync_channel(32);
+        let (cache_tx, cache_rx) = mpsc::sync_channel(1);
+        let config = cache_config.clone();
         let rescan_options = options.clone();
         let worker_progress = progress.clone();
         std::thread::spawn(move || {
-            let result = scan_live(options, worker_progress, live_tx);
-            let _ = sender.send(result);
+            let (cache, mut warning) = match Cache::new(&options, &config) {
+                Ok(cache) => (cache, None),
+                Err(error) => (None, Some(format!("Cache unavailable: {error}"))),
+            };
+            let cached = match cache.as_ref().map(|c| c.load(&worker_progress)).transpose() {
+                Ok(cached) => cached.flatten(),
+                Err(error) => {
+                    warning = Some(format!("Cache ignored: {error}"));
+                    None
+                }
+            };
+            if cache_tx.send((cached, warning)).is_err() {
+                return;
+            }
+            let result = scan_live(options, worker_progress.clone(), live_tx);
+            let cache_message = if let (Some(cache), Ok(tree)) = (&cache, &result) {
+                Some(match cache.save(tree, &worker_progress) {
+                    Ok(()) => "Cache saved".into(),
+                    Err(error) => format!("Cache not saved: {error}"),
+                })
+            } else {
+                None
+            };
+            let _ = sender.send((result, cache_message));
         });
+        let mut startup_ready = false;
+        let mut startup_notice = String::new();
+        let mut cached_age = None;
         let (tree, mut live_state, scanning) = loop {
             if progress.is_cancelled() {
                 return Ok(130);
             }
-            if let Ok(LiveEvent::Root(root, metadata)) = live_rx.try_recv() {
+            if !startup_ready {
+                match cache_rx.try_recv() {
+                    Ok((cached, warning)) => {
+                        startup_ready = true;
+                        if let Some(warning) = warning {
+                            startup_notice = display_name(warning.as_ref());
+                        }
+                        if let Some((tree, age)) = cached {
+                            let state = LiveState::from_cached(&tree);
+                            cached_age = Some(age);
+                            break (tree, Some(state), true);
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err(io::Error::other("cache loader stopped unexpectedly"));
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if startup_ready && let Ok(LiveEvent::Root(root, metadata)) = live_rx.try_recv() {
                 let (tree, state) = LiveState::start(root, metadata);
                 break (tree, Some(state), true);
             }
-            match receiver.try_recv() {
-                Ok(result) => break (result?, None, false),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(io::Error::other("scanner stopped unexpectedly"));
+            if startup_ready {
+                match receiver.try_recv() {
+                    Ok((result, message)) => {
+                        if let Some(message) = message {
+                            startup_notice = display_name(message.as_ref());
+                        }
+                        break (result?, None, false);
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        return Err(io::Error::other("scanner stopped unexpectedly"));
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
             }
             terminal.draw(|frame| {
-                let phase = if progress.phase.load(Ordering::Relaxed) == 1 { "Aggregating ownership totals" } else { "Scanning" };
+                let phase = if !startup_ready { "Loading cache / preparing scan" } else if progress.phase.load(Ordering::Relaxed) == 1 { "Aggregating ownership totals" } else { "Scanning" };
                 let text = format!("{phase}: {root_label}\n\n{} entries inspected | {} errors | {:.1}s\n\nOpening live results as entries arrive. q / Esc / Ctrl-C cancels.",
                     progress.entries.load(Ordering::Relaxed), progress.errors.load(Ordering::Relaxed), start.elapsed().as_secs_f64());
                 frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title(" zhandu ")), frame.area());
@@ -1127,13 +1187,24 @@ pub fn run(
         }
         let mut app = App::new(tree, filter, view, apparent);
         app.scanning = scanning;
-        if !scanning {
-            app.notice = "Scan complete. Space marks files; x reviews deletion".into();
+        app.cached_refresh = cached_age.is_some();
+        app.notice = if let Some(age) = cached_age {
+            format!(
+                "Cached snapshot from {age}s ago; unvisited/missing entries remain until refresh completes"
+            )
+        } else if !scanning {
+            format!("Scan complete. {startup_notice}")
+        } else {
+            startup_notice
+        };
+        if app.cached_refresh {
+            terminal.draw(|frame| app.draw(frame))?;
         }
         let mut dirty = true;
         let mut live_changed = false;
         let mut last_refresh = Instant::now();
-        let (delete_tx, delete_rx) = mpsc::channel();
+        type DeleteResult = (Outcome, io::Result<Tree>, PathBuf, Option<String>);
+        let (delete_tx, delete_rx) = mpsc::channel::<DeleteResult>();
         let mut deletion_worker = DeletionWorker {
             handle: None,
             progress: progress.clone(),
@@ -1157,8 +1228,12 @@ pub fn run(
                     live_changed = true;
                 }
                 match receiver.try_recv() {
-                    Ok(result) => {
+                    Ok((result, cache_message)) => {
                         app.refresh_scan(Some(result?));
+                        if let Some(message) = cache_message {
+                            app.notice
+                                .push_str(&format!(" | {}", display_name(message.as_ref())));
+                        }
                         live_state = None;
                         live_changed = false;
                         dirty = true;
@@ -1185,13 +1260,17 @@ pub fn run(
                     }
                 }
             }
-            if let Ok((outcome, scanned, previous)) = delete_rx.try_recv() {
+            if let Ok((outcome, scanned, previous, cache_message)) = delete_rx.try_recv() {
                 if let Some(handle) = deletion_worker.handle.take() {
                     handle
                         .join()
                         .map_err(|_| io::Error::other("deletion worker panicked"))?;
                 }
                 app.finish_deletion(outcome, scanned, previous);
+                if let Some(message) = cache_message {
+                    app.notice
+                        .push_str(&format!("\n{}", display_name(message.as_ref())));
+                }
                 dirty = true;
             }
             if deletion_worker
@@ -1217,10 +1296,22 @@ pub fn run(
                 let options = rescan_options.clone();
                 let worker_progress = progress.clone();
                 let sender = delete_tx.clone();
+                let config = cache_config.clone();
                 deletion_worker.handle = Some(std::thread::spawn(move || {
                     let outcome = deletion::execute(marks, &worker_progress);
-                    let scanned = scan(options, worker_progress);
-                    let _ = sender.send((outcome, scanned, previous));
+                    let cache = Cache::new(&options, &config);
+                    let scanned = scan(options, worker_progress.clone());
+                    let cache_message = match (cache, &scanned) {
+                        (Ok(Some(cache)), Ok(tree)) => {
+                            Some(match cache.save(tree, &worker_progress) {
+                                Ok(()) => "Cache saved".into(),
+                                Err(error) => format!("Cache not saved: {error}"),
+                            })
+                        }
+                        (Err(error), _) => Some(format!("Cache unavailable: {error}")),
+                        _ => None,
+                    };
+                    let _ = sender.send((outcome, scanned, previous, cache_message));
                 }));
             }
             let mut names_changed = false;

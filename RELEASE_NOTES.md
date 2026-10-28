@@ -1,11 +1,13 @@
-**zhandu v0.3.0** shows live, browsable scan results.
+**zhandu v0.4.0** adds a persistent SQLite scan cache.
 
-- Open the TUI as soon as the scan root is ready; entries, sizes, owners and errors arrive in batches.
-- Refresh partial results up to five times per second while retaining directory and selection across updates.
-- Browse subdirectories and filter by user/group during scanning.
-- Clearly label provisional totals; reconcile with the final deterministic hard-link accounting.
-- Keep marking/deletion disabled until scanning completes. JSON remains a final report.
-- Use a bounded update queue; retain an additional partial tree while scanning.
+- Open previous scan results on startup, clearly labeled cached, then refresh in the background.
+- Update cached rows and add new entries while scanning; prune missing entries when refresh completes.
+- Save completed, error-free snapshots atomically, retaining the previous snapshot on interruption or failure.
+- Match caches by root identity and traversal settings; preserve Windows ownership using SIDs.
+- Enable caching by default for the TUI; add `--no-cache` and `--cache-db PATH`. JSON always scans fresh.
+- Retain the 16 most recent root/configuration snapshots; keep Unix cache files private.
+- Keep marking/deletion disabled during refresh. Cache failures fall back to live scanning.
+- SQLite is bundled. Building from source now requires Rust 1.89 or newer.
 - Install/update with `cargo install zhandu --locked`.
 
 ## Downloads

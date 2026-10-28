@@ -7,6 +7,7 @@ from pathlib import Path
 import pty
 import select
 import signal
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -17,7 +18,7 @@ import time
 binary = str(Path(sys.argv[1]).resolve())
 
 
-def session(path, action, expected):
+def session(path, action, expected, cache_db=None):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
     env = dict(os.environ, TERM="xterm-256color")
@@ -38,7 +39,7 @@ restored = termios.tcgetattr(0) == original
 os.write(1, b'ZHANDU_TERMINAL_RESTORED=' + str(restored).encode() + b'\\n')
 sys.exit(code)
 """
-    proc = subprocess.Popen([sys.executable, "-c", wrapper, binary, "--numeric-ids", str(path)], stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=child_session)
+    proc = subprocess.Popen([sys.executable, "-c", wrapper, binary, "--numeric-ids", *(["--cache-db", str(cache_db)] if cache_db else ["--no-cache"]), str(path)], stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=child_session)
     captured = bytearray()
 
     def pump(timeout=0.05):
@@ -91,6 +92,11 @@ sys.exit(code)
             assert not (path / "delete-me").exists()
             assert b"reclaimed:" in captured
             os.write(master, b"\rq")
+        elif action in ("cache_warm", "cache_refresh"):
+            if action == "cache_refresh":
+                wait_for(b"CACHED")
+            wait_for(b"complete.")
+            os.write(master, b"q")
         elif action == "cancel":
             wait_for(b"Scanning")
             os.write(master, b"\x03")
@@ -128,3 +134,21 @@ with tempfile.TemporaryDirectory(prefix="zhandu-pty-") as tmp:
     for i in range(5000):
         (root / f"entry-{i:05}").touch()
     session(root, "cancel", 130)
+
+with tempfile.TemporaryDirectory(prefix="zhandu-cache-pty-") as tmp:
+    cache_root = Path(tmp) / "root"
+    cache_root.mkdir()
+    database = Path(tmp) / "scans.sqlite3"
+    (cache_root / "gone").write_bytes(b"old")
+    (cache_root / "changed").write_bytes(b"old")
+    session(cache_root, "cache_warm", 0, database)
+    (cache_root / "gone").unlink()
+    (cache_root / "changed").write_bytes(b"x" * 16384)
+    (cache_root / "new").write_bytes(b"new")
+    session(cache_root, "cache_refresh", 0, database)
+    with sqlite3.connect(database) as conn:
+        nodes = dict(conn.execute("SELECT name,apparent FROM nodes"))
+        assert os.fsencode("gone") not in nodes
+        assert nodes[os.fsencode("changed")] == 16384
+        assert os.fsencode("new") in nodes
+    print("PASS: persistent cache updated across processes, removed entries pruned")

@@ -57,6 +57,12 @@ struct Args {
     /// Display Unix IDs / Windows SIDs without account-name lookups
     #[arg(long)]
     numeric_ids: bool,
+    /// Disable persistent scan caching (JSON always scans fresh)
+    #[arg(long, conflicts_with = "cache_db")]
+    no_cache: bool,
+    /// Use this SQLite cache instead of the per-user default
+    #[arg(long, value_name = "PATH")]
+    cache_db: Option<PathBuf>,
 }
 
 fn resolve(value: Option<&str>, group: bool) -> Result<Option<u32>, String> {
@@ -208,6 +214,10 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             view,
             args.apparent_size,
             args.numeric_ids,
+            zhandu::cache::CacheConfig {
+                enabled: !args.no_cache,
+                path: args.cache_db,
+            },
         )?)
     }
 }

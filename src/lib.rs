@@ -1,3 +1,4 @@
+pub mod cache;
 mod deletion;
 pub mod model;
 pub mod platform;

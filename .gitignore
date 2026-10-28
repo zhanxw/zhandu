@@ -3,3 +3,9 @@
 __pycache__/
 /dist/
 .DS_Store
+
+# Local scan databases (never include filesystem inventories in releases)
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
