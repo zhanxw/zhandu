@@ -121,7 +121,7 @@ Use the release build for performance measurements. The first dependency downloa
 | e | Inspect scan errors; up/down scroll |
 | i | Inspect selected path, ownership, sizes, status, and marking eligibility; Esc returns |
 | ? | Help |
-| q | Quit |
+| q | Close help/error/details when open; otherwise quit the browser |
 | Ctrl-C | Cancel / interrupt |
 
 The default layout has two panels: a Users/Groups selector on the left and a directory browser on the right (stacked on narrow terminals). The browser initially shows directories only. Press **g** or **u** to focus the corresponding owner selector. **All groups** and **All users** stay pinned; **Home**, then **Enter** selects All while preserving the other filter. The selected owner controls the browser at the current path. **Enter/Right** from owners focuses the browser; **Tab** switches focus between panels.

@@ -73,6 +73,16 @@ sys.exit(code)
             while time.monotonic() < end:
                 pump(0.02)
             os.write(master, b"q")
+        elif action == "help_close":
+            wait_for(b"complete.")
+            os.write(master, b"?")
+            wait_for(b"close panel")
+            os.write(master, b"q")
+            end = time.monotonic() + 0.3
+            while time.monotonic() < end:
+                pump(0.02)
+            assert proc.poll() is None, "q must close help without exiting"
+            os.write(master, b"q")
         elif action == "layout":
             wait_for(b"complete.")
             # Default startup is the Users + browser layout. Reveal and mark a
@@ -187,6 +197,7 @@ with tempfile.TemporaryDirectory(prefix="zhandu-pty-") as tmp:
     (root / "nested" / "data").write_bytes(b"z" * 8192)
     session(root, "browse", 0)
     session(root, "layout", 0)
+    session(root, "help_close", 0)
     session(root, "search", 0)
     session(root, "refresh", 0)
     (root / "failure").mkdir()

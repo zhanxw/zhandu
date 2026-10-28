@@ -1012,6 +1012,16 @@ impl App {
             }
             return false;
         }
+        // Close informational panels before interpreting q as application quit.
+        // Holding q must not dismiss the panel and then quit on a repeat event.
+        if key.code == KeyCode::Char('q') {
+            if key.kind == KeyEventKind::Repeat {
+                return false;
+            }
+            if self.overlay.take().is_some() {
+                return false;
+            }
+        }
         if key.code == KeyCode::Char('q')
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
@@ -1391,7 +1401,7 @@ impl App {
             let text = if matches!(overlay, Overlay::Details) {
                 self.details.clone()
             } else if matches!(overlay, Overlay::Help) {
-                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng/u: focus Groups/Users   d: toggle files   v: toggle one/two panels   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nBrowser: →/Enter opens directories; ←/Backspace always goes up (root stops).\nTab switches focus in two-panel mode. d never changes layout or focus.\nAll stays pinned. Both panels describe the current path; filters persist.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. q exits without deleting marks.\nEsc closes this panel.".to_owned()
+                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng/u: focus Groups/Users   d: toggle files   v: toggle one/two panels   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: close panel / quit browser\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nBrowser: →/Enter opens directories; ←/Backspace always goes up (root stops).\nTab switches focus in two-panel mode. d never changes layout or focus.\nAll stays pinned. Both panels describe the current path; filters persist.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. In the browser, q exits without deleting marks.\nq or Esc closes this panel.".to_owned()
             } else if self.tree.errors.is_empty() {
                 "No scan errors.".to_owned()
             } else {
@@ -1529,7 +1539,9 @@ impl App {
         } else {
             self.notice.lines().next().unwrap_or("").into()
         };
-        let keys = if self.editing_search {
+        let keys = if self.overlay.is_some() {
+            "↑↓ scroll  q / Esc close panel  Ctrl-C interrupt"
+        } else if self.editing_search {
             "Enter navigate  Esc clear search  Backspace edit"
         } else if self.view == View::Directories {
             "↑↓ select  → open  ← parent  / search  g/u owners  r refresh  ? help  q quit"
@@ -2000,6 +2012,29 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn q_closes_information_panels_before_quitting_the_browser() {
+        for key in ['?', 'e', 'i'] {
+            let mut app = fixture_app();
+            let filter = app.filter;
+            let current = app.current;
+            press(&mut app, KeyCode::Char(key));
+            assert!(app.overlay.is_some());
+            assert!(screen(&mut app, 120, 30).contains("q / Esc close panel"));
+            press(&mut app, KeyCode::Char('q'));
+            assert!(app.overlay.is_none());
+            assert_eq!(app.current, current);
+            assert_eq!(app.filter, filter);
+            let mut repeat = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+            repeat.kind = KeyEventKind::Repeat;
+            assert!(!app.key(repeat));
+            assert!(app.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+        }
+        let mut app = fixture_app();
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
     }
 
     #[test]
