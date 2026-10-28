@@ -1,13 +1,15 @@
-**zhandu v0.5.0** improves owner filtering, panel search, and scan status clarity.
+**zhandu v0.6.0** makes owner-filtered browsing more consistent and adds display controls, safer refresh recovery, and a short terminal demo.
 
-- Keep All users / All groups pinned at the top of each owner picker. Home then Enter clears that filter while preserving the other.
-- Show named user and group filters beneath the current path; label owner previews and each panel's scope.
-- Search the focused panel with `/`, finish typing with Enter, and clear search with Esc before clearing ownership filters.
-- Keep directory columns aligned when panel focus changes.
-- Distinguish complete, cached-refreshing, scanning, and finished-with-errors states. Provisional aggregate sizes use `~`; uncertain zeros show `…`.
-- Keep Tab dedicated to panel focus and show context-specific keyboard hints.
-- Preserve existing caching and deletion safeguards. Search changes visible rows, not accounting totals or file marks.
-- Install/update with `cargo install zhandu --locked` (Rust 1.89 or newer).
+- Start with two panels. `v` switches between one and two panels; `d` toggles files without changing layout. Left/Backspace goes to the parent directory; Tab switches panel focus.
+- Press `p` to show/hide percentages in both panels. Percentages follow the current size mode and filtered totals.
+- Highlight sizes ≥1 GiB in yellow and ≥100 GiB in bold red. Shift+C toggles size colors.
+- Press `q` in help, error, or details panels to close the panel; `q` in the browser exits.
+- Press `r` for background refresh while retaining navigation and filters; revalidate file marks before enabling deletion again.
+- Press `z` to hide known zero usage and `i` for entry details. Keep marks, cache age, and branch completeness visible.
+- Preserve partial caches alongside complete snapshots and recover safely when selected paths or scan roots change.
+- Add a 13-second terminal demo to the README.
+
+Install/update with `cargo install zhandu --locked` (Rust 1.89 or newer).
 
 ## Downloads
 

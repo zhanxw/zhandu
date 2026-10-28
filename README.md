@@ -4,6 +4,12 @@ A fast disk usage explorer written in Rust for **Windows, Linux, and macOS**. Sc
 
 [Download the latest release](https://github.com/zhanxw/zhandu/releases/latest) · [Build status](https://github.com/zhanxw/zhandu/actions/workflows/ci.yml)
 
+## Demo
+
+[![13-second terminal demo: group filtering, navigation, and display toggles](https://raw.githubusercontent.com/zhanxw/zhandu/v0.6.0/docs/demo/zhandu-demo.gif)](https://github.com/zhanxw/zhandu/blob/v0.6.0/docs/demo/zhandu-demo.mp4)
+
+[Watch or download the 13-second video](https://github.com/zhanxw/zhandu/raw/refs/tags/v0.6.0/docs/demo/zhandu-demo.mp4). Recorded with sample sparse files in apparent-size mode.
+
 ## Run
 
 Download and extract the archive for your platform, then run `zhandu` (`zhandu.exe` in Windows PowerShell). Release archives contain documentation, licenses, and an optimized executable. Verify downloads against the release’s `SHA256SUMS`.
