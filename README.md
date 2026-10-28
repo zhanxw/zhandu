@@ -111,6 +111,8 @@ Use the release build for performance measurements. The first dependency downloa
 | g / u / d | Choose group / choose user / directory browser |
 | / | Search names or owners in the focused panel (case-insensitive substring); Enter finishes typing |
 | Escape | Close help/error panel first; otherwise clear focused-panel search before clearing both ownership filters |
+| r | Refresh in the background, preserving navigation and filters; revalidate existing marks |
+| z | Hide/show known zero-usage entries; retain uncertain directories |
 | a | Toggle allocated disk usage / apparent size |
 | s | Toggle size / name sorting |
 | Home / End, PageUp / PageDown | Navigate long lists |
@@ -208,3 +210,7 @@ Linux x64 builds target glibc 2.35+; Linux ARM64 targets glibc 2.39+. Windows us
 - `scripts/`: real-terminal smoke tests and reproducible benchmark.
 
 MIT licensed. Dependencies retain their own licenses.
+
+### Refresh and visibility
+
+Press `r` to refresh without restarting. Browse the previous results while metadata updates. Marking and deletion stay disabled until the refresh finishes. Changed or missing marked files are unmarked; deletion still independently checks each file at confirmation. A failed refresh keeps the existing results visible as stale and allows `r` to retry, with deletion disabled. `z` hides known zero-usage entries without hiding uncertain directories or changing totals or marks. The footer always shows marked-file count and estimated reclaimable space, including when there are scan errors. Cache age remains visible during refresh and search.

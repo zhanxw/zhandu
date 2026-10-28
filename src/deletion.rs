@@ -16,6 +16,22 @@ pub(crate) struct Mark {
 }
 
 impl Mark {
+    pub(crate) fn revalidate(&self) -> io::Result<()> {
+        for (path, identity) in &self.ancestors {
+            let metadata = read_metadata(path)?;
+            if !metadata.is_dir || metadata.is_symlink || (metadata.dev, metadata.ino) != *identity
+            {
+                return Err(io::Error::other("Parent directory changed since marking"));
+            }
+        }
+        let stat = fs::symlink_metadata(&self.path)?;
+        self.verify(
+            &read_metadata(&self.path)?,
+            stat.modified()?,
+            stat.is_file(),
+        )
+    }
+
     pub fn new(tree: &Tree, id: usize) -> io::Result<Self> {
         let node = &tree.nodes[id];
         let path = tree.path(id);

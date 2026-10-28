@@ -2,7 +2,8 @@ use crate::{
     cache::{Cache, CacheConfig},
     deletion::{self, Mark, Outcome},
     model::{Filter, Tree, Usage, display_name, human},
-    scan::{LiveEvent, LiveState, Progress, ScanOptions, scan, scan_live},
+    scan::{LiveEvent, LiveState, Progress, ScanOptions, scan},
+    session::ScanSession,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -68,6 +69,9 @@ pub struct App {
     scanning: bool,
     cached_refresh: bool,
     cache_age: Option<(i64, Instant)>,
+    refresh_requested: bool,
+    refresh_error: Option<String>,
+    hide_zero: bool,
     live_directory_anchor: Option<Item>,
     owner_search: String,
     directory_search: String,
@@ -104,6 +108,9 @@ impl App {
             scanning: false,
             cached_refresh: false,
             cache_age: None,
+            refresh_requested: false,
+            refresh_error: None,
+            hide_zero: false,
             live_directory_anchor: None,
             owner_search: String::new(),
             directory_search: String::new(),
@@ -232,6 +239,11 @@ impl App {
                 item: Item::Node(id),
                 name: format!("{}/", display_name(&self.tree.nodes[id].name)),
                 usage: self.tree.nodes[id].usage(filter),
+            })
+            .filter(|entry| {
+                !self.hide_zero
+                    || entry.usage.bytes(self.apparent) > 0
+                    || self.uncertain_usage(entry.item)
             })
             .filter(|entry| query.is_empty() || entry.name.to_lowercase().contains(&query))
             .collect();
@@ -511,6 +523,12 @@ impl App {
                         if !self.filter.is_empty() && usage.inodes == 0 && !child.is_dir {
                             return None;
                         }
+                        if self.hide_zero
+                            && usage.bytes(self.apparent) == 0
+                            && !self.uncertain_usage(Item::Node(id))
+                        {
+                            return None;
+                        }
                         let mut name = display_name(&child.name);
                         if child.is_dir {
                             name.push('/');
@@ -654,6 +672,8 @@ impl App {
             });
             self.scanning = false;
             self.cached_refresh = false;
+            self.refresh_error = None;
+            self.cache_age = Some((0, Instant::now()));
             self.notice = if self.tree.error_count > 0 {
                 "Scan finished with errors; e shows affected paths. Totals may be incomplete".into()
             } else {
@@ -680,7 +700,7 @@ impl App {
     }
 
     fn toggle_mark(&mut self) {
-        if self.scanning {
+        if self.scanning || self.cached_refresh {
             self.notice =
                 "Scanning: file marking/deletion becomes available when results are complete"
                     .into();
@@ -883,7 +903,7 @@ impl App {
                     return false;
                 }
                 KeyCode::Char('x') => {
-                    if self.scanning {
+                    if self.scanning || self.cached_refresh {
                         self.notice =
                             "Scanning: deletion is disabled until the scan finishes".into();
                     } else if self.marks.is_empty() {
@@ -980,6 +1000,19 @@ impl App {
                 self.directory_search.clear();
                 self.selected = 0;
                 changed = true;
+            }
+            KeyCode::Char('r') => {
+                if !self.scanning {
+                    self.refresh_requested = true;
+                } else {
+                    self.notice = "Refresh already running".into();
+                }
+            }
+            KeyCode::Char('z') => {
+                self.hide_zero = !self.hide_zero;
+                changed = true;
+                self.directory_selected = 0;
+                self.directory_offset = 0;
             }
             KeyCode::Char('a') => {
                 self.apparent = !self.apparent;
@@ -1102,7 +1135,11 @@ impl App {
             },
             incomplete,
             if self.cached_refresh {
-                " | CACHED - refreshing"
+                if self.scanning {
+                    " | CACHED - refreshing"
+                } else {
+                    " | STALE - refresh failed"
+                }
             } else if self.scanning {
                 " | Scanning - PARTIAL"
             } else if self.tree.error_count > 0 {
@@ -1142,7 +1179,7 @@ impl App {
         );
         if let Some(help) = self.overlay {
             let text = if help {
-                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng: choose group   u: choose user   d: directories   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nHome/End, PageUp/PageDown: move   e: errors   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nDirectory panel: →/Enter opens, ← goes up (at starting path: owners).\nTab switches focus in owner views; d opens files with the same filter.\nAll stays pinned. Owner totals use the labeled scope; browsing may be deeper.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. q exits without deleting marks.\nEsc closes this panel.".to_owned()
+                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng: choose group   u: choose user   d: directories   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nDirectory panel: →/Enter opens, ← goes up (at starting path: owners).\nTab switches focus in owner views; d opens files with the same filter.\nAll stays pinned. Owner totals use the labeled scope; browsing may be deeper.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. q exits without deleting marks.\nEsc closes this panel.".to_owned()
             } else if self.tree.errors.is_empty() {
                 "No scan errors.".to_owned()
             } else {
@@ -1250,6 +1287,8 @@ impl App {
                     "Esc clears search; / edit"
                 }
             )
+        } else if let Some(error) = &self.refresh_error {
+            format!("Refresh failed: {error}; r retries")
         } else if self.cached_refresh {
             format!(
                 "Cache: {}s old | Refreshing; unvisited entries may be stale",
@@ -1262,18 +1301,19 @@ impl App {
         let keys = if self.editing_search {
             "Enter navigate  Esc clear search  Backspace edit"
         } else if self.view == View::Directories {
-            "↑↓ select  → open  ← parent  / search  g/u owners  Esc filters  ? help  q quit"
+            "↑↓ select  → open  ← parent  / search  r refresh  z zeros  g/u owners  ? help"
         } else if self.directory_focus {
-            "↑↓ select  → open  ← parent  Tab owners  / search  d files  Esc filters  ? help"
+            "↑↓ select  → open  ← parent  Tab owners  / search  r refresh  z zeros  d files"
         } else {
-            "↑↓ preview  Home All  → directories  Tab focus  / search  Esc filters  ? help"
+            "↑↓ preview  Home All  → directories  Tab focus  / search  r refresh  z zeros"
         };
         let status = format!(
-            "Total {} | {} inodes | scan {:.2}s | {} errors\n{}\n{}\n{}",
+            "Total {} | {} inodes | scan {:.2}s | {} errors | zeros {}\n{}\n{}\n{}",
             self.usage_label(Item::Node(self.current), usage),
             usage.inodes,
             self.tree.elapsed_seconds,
             self.tree.error_count,
+            if self.hide_zero { "hidden" } else { "shown" },
             activity,
             search,
             keys
@@ -1310,39 +1350,15 @@ pub fn run(
     // Ratatui's guard restores terminal modes on return, errors, and panics.
     ratatui::run(|terminal| -> io::Result<i32> {
         let root_label = display_name(options.path.as_os_str());
-        let start = Instant::now();
-        let (sender, receiver) = mpsc::channel();
-        let (live_tx, live_rx) = mpsc::sync_channel(32);
-        let (cache_tx, cache_rx) = mpsc::sync_channel(1);
-        let config = cache_config.clone();
+        let mut start = Instant::now();
         let rescan_options = options.clone();
-        let worker_progress = progress.clone();
-        std::thread::spawn(move || {
-            let (cache, mut warning) = match Cache::new(&options, &config) {
-                Ok(cache) => (cache, None),
-                Err(error) => (None, Some(format!("Cache unavailable: {error}"))),
-            };
-            let cached = match cache.as_ref().map(|c| c.load(&worker_progress)).transpose() {
-                Ok(cached) => cached.flatten(),
-                Err(error) => {
-                    warning = Some(format!("Cache ignored: {error}"));
-                    None
-                }
-            };
-            if cache_tx.send((cached, warning)).is_err() {
-                return;
-            }
-            let result = scan_live(options, worker_progress.clone(), live_tx);
-            let cache_message = if let (Some(cache), Ok(tree)) = (&cache, &result) {
-                Some(match cache.save(tree, &worker_progress) {
-                    Ok(()) => "Cache saved".into(),
-                    Err(error) => format!("Cache not saved: {error}"),
-                })
-            } else {
-                None
-            };
-            let _ = sender.send((result, cache_message));
-        });
+        let mut session = ScanSession::start(
+            options,
+            progress.clone(),
+            cache_config.clone(),
+            true,
+            vec![],
+        );
         let mut startup_ready = false;
         let mut startup_notice = String::new();
         let mut cached_age = None;
@@ -1351,7 +1367,7 @@ pub fn run(
                 return Ok(130);
             }
             if !startup_ready {
-                match cache_rx.try_recv() {
+                match session.startup.try_recv() {
                     Ok((cached, warning)) => {
                         startup_ready = true;
                         if let Some(warning) = warning {
@@ -1369,13 +1385,14 @@ pub fn run(
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
             }
-            if startup_ready && let Ok(LiveEvent::Root(root, metadata)) = live_rx.try_recv() {
+            if startup_ready && let Ok(LiveEvent::Root(root, metadata)) = session.events.try_recv()
+            {
                 let (tree, state) = LiveState::start(root, metadata);
                 break (tree, Some(state), true);
             }
             if startup_ready {
-                match receiver.try_recv() {
-                    Ok((result, message)) => {
+                match session.completed.try_recv() {
+                    Ok((result, message, _)) => {
                         if let Some(message) = message {
                             startup_notice = display_name(message.as_ref());
                         }
@@ -1451,11 +1468,35 @@ pub fn run(
             progress: progress.clone(),
         };
         loop {
+            if app.refresh_requested {
+                app.refresh_requested = false;
+                progress.entries.store(0, Ordering::Relaxed);
+                progress.errors.store(0, Ordering::Relaxed);
+                progress.phase.store(0, Ordering::Relaxed);
+                live_state = Some(LiveState::from_cached(&app.tree));
+                session = ScanSession::start(
+                    rescan_options.clone(),
+                    progress.clone(),
+                    cache_config.clone(),
+                    false,
+                    app.marks.values().cloned().collect(),
+                );
+                app.scanning = true;
+                app.cached_refresh = true;
+                app.refresh_error = None;
+                if app.cache_age.is_none() {
+                    app.cache_age = Some((0, Instant::now()));
+                }
+                app.notice = "Refreshing filesystem metadata; browsing remains available".into();
+                start = Instant::now();
+                live_changed = false;
+                dirty = true;
+            }
             if app.scanning {
                 // Bound UI work per turn; render/sort at most five times per second.
                 let drain_start = Instant::now();
                 while drain_start.elapsed() < Duration::from_millis(10) {
-                    let Ok(event) = live_rx.try_recv() else {
+                    let Ok(event) = session.events.try_recv() else {
                         break;
                     };
                     if !live_changed {
@@ -1468,9 +1509,27 @@ pub fn run(
                     live_state.as_mut().unwrap().apply(&mut app.tree, event);
                     live_changed = true;
                 }
-                match receiver.try_recv() {
-                    Ok((result, cache_message)) => {
-                        app.refresh_scan(Some(result?));
+                match session.completed.try_recv() {
+                    Ok((result, cache_message, valid)) => {
+                        let old_marks = app.marks.len();
+                        match result {
+                            Ok(tree) => {
+                                app.refresh_scan(Some(tree));
+                                app.marks.retain(|path, _| valid.contains(path));
+                                if old_marks != app.marks.len() {
+                                    app.notice.push_str(&format!(
+                                        " | {} changed/missing marks cleared",
+                                        old_marks - app.marks.len()
+                                    ));
+                                }
+                            }
+                            Err(error) => {
+                                app.scanning = false;
+                                app.cached_refresh = true;
+                                app.refresh_error = Some(display_name(error.to_string().as_ref()));
+                                app.notice = "Refresh failed. Previous values are stale; r retries. Deletion disabled".into();
+                            }
+                        }
                         if let Some(message) = cache_message {
                             app.notice
                                 .push_str(&format!(" | {}", display_name(message.as_ref())));
@@ -1775,6 +1834,31 @@ mod tests {
         assert!(screen(&mut app, 80, 24).contains("Search names:"));
         press(&mut app, KeyCode::Esc);
         assert!(!app.rows.is_empty());
+    }
+
+    #[test]
+    fn refresh_and_hide_zero_keep_filters_and_unknown_directories() {
+        let mut app = fixture_app();
+        let filter = app.filter;
+        press(&mut app, KeyCode::Right);
+        let before = app.subdirectories(filter).len();
+        assert!(before > 0);
+        press(&mut app, KeyCode::Char('z'));
+        assert!(app.subdirectories(filter).is_empty());
+        app.scanning = true;
+        assert_eq!(app.subdirectories(filter).len(), before);
+        press(&mut app, KeyCode::Char('r'));
+        assert!(!app.refresh_requested);
+        app.scanning = false;
+        press(&mut app, KeyCode::Char('r'));
+        assert!(app.refresh_requested);
+        assert_eq!(app.filter, filter);
+        assert!(app.directory_focus);
+        app.cached_refresh = true;
+        app.refresh_error = Some("offline".into());
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.review.is_none());
+        assert!(screen(&mut app, 140, 24).contains("STALE - refresh failed"));
     }
 
     #[test]

@@ -92,6 +92,14 @@ sys.exit(code)
             assert not (path / "delete-me").exists()
             assert b"reclaimed:" in captured
             os.write(master, b"\rq")
+        elif action == "refresh":
+            wait_for(b"complete.")
+            (path / "refresh-added").write_bytes(b"new data")
+            captured.clear()
+            os.write(master, b"r")
+            wait_for(b"refresh-added")
+            wait_for(b"complete.")
+            os.write(master, b"q")
         elif action == "search":
             wait_for(b"complete.")
             os.write(master, b"u")
@@ -146,6 +154,7 @@ with tempfile.TemporaryDirectory(prefix="zhandu-pty-") as tmp:
     (root / "nested" / "data").write_bytes(b"z" * 8192)
     session(root, "browse", 0)
     session(root, "search", 0)
+    session(root, "refresh", 0)
     session(root / "missing", "error", 1)
     session(root, "interrupt", 130)
     with tempfile.TemporaryDirectory(prefix="zhandu-delete-pty-") as delete_tmp:
