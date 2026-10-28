@@ -54,7 +54,13 @@ impl ScanSession {
             let result = scan_live(options, progress.clone(), live_tx);
             let message = if let (Some(cache), Ok(tree)) = (&cache, &result) {
                 Some(match cache.save(tree, &progress) {
-                    Ok(()) => "Cache saved".into(),
+                    Ok(()) => {
+                        if tree.error_count > 0 {
+                            "Partial cache saved; previous complete snapshot retained".into()
+                        } else {
+                            "Cache saved".into()
+                        }
+                    }
                     Err(error) => format!("Cache not saved: {error}"),
                 })
             } else {

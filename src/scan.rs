@@ -1,4 +1,4 @@
-use crate::model::{Node, Tree, Usage, display_name};
+use crate::model::{Node, ScanState, Tree, Usage, display_name};
 use crate::platform::{EntryMetadata, read_metadata};
 use rayon::{Scope, prelude::*};
 use std::{
@@ -188,10 +188,16 @@ fn read_directory(path: &PathBuf, id: usize, context: &Context<'_>) -> Directory
         .progress
         .errors
         .fetch_add(batch.error_count, Ordering::Relaxed);
-    if batch.error_count > 0
-        && let Some(sender) = context.live
+    if let Some(sender) = context.live
+        && sender
+            .send(LiveEvent::DirectoryFinished {
+                path: path.clone(),
+                count: batch.error_count,
+                errors: batch.errors.clone(),
+            })
+            .is_err()
     {
-        let _ = sender.send(LiveEvent::Errors(batch.error_count, batch.errors.clone()));
+        context.progress.cancel();
     }
 
     batch
@@ -221,7 +227,11 @@ fn walk_parallel<'scope>(
     }
 }
 
-fn collect_batch(batch: DirectoryBatch, records: &mut Vec<Option<Vec<Entry>>>, tree: &mut Tree) {
+fn collect_batch(
+    batch: DirectoryBatch,
+    records: &mut Vec<Option<(Vec<Entry>, u64)>>,
+    tree: &mut Tree,
+) {
     tree.error_count += batch.error_count;
     tree.errors.extend(
         batch
@@ -232,7 +242,7 @@ fn collect_batch(batch: DirectoryBatch, records: &mut Vec<Option<Vec<Entry>>>, t
     if records.len() <= batch.id {
         records.resize_with(batch.id + 1, || None);
     }
-    records[batch.id] = Some(batch.entries);
+    records[batch.id] = Some((batch.entries, batch.error_count));
 }
 
 fn append_node(
@@ -251,6 +261,11 @@ fn append_node(
     };
     let id = tree.nodes.len();
     tree.nodes.push(Node {
+        scan: ScanState {
+            own_pending: metadata.is_dir,
+            pending: u64::from(metadata.is_dir),
+            ..ScanState::default()
+        },
         identity: (metadata.dev, metadata.ino),
         name,
         parent,
@@ -376,14 +391,18 @@ fn scan_inner(
     let mut hard_links = HashSet::new();
     let root_name = root.file_name().unwrap_or(root.as_os_str()).to_os_string();
     append_node(&mut tree, root_name, root_metadata, None, &mut hard_links);
-    let take_record =
-        |records: &mut Vec<Option<Vec<Entry>>>, id: usize| -> io::Result<Vec<Entry>> {
-            records
-                .get_mut(id)
-                .and_then(Option::take)
-                .ok_or_else(|| io::Error::other("scanner did not return a directory result"))
-        };
-    let mut stack = vec![(0, take_record(&mut records, 0)?.into_iter())];
+    let take_record = |records: &mut Vec<Option<(Vec<Entry>, u64)>>,
+                       id: usize|
+     -> io::Result<(Vec<Entry>, u64)> {
+        records
+            .get_mut(id)
+            .and_then(Option::take)
+            .ok_or_else(|| io::Error::other("scanner did not return a directory result"))
+    };
+    let (entries, errors) = take_record(&mut records, 0)?;
+    tree.nodes[0].scan.own_pending = false;
+    tree.nodes[0].scan.own_errors = errors;
+    let mut stack = vec![(0, entries.into_iter())];
     while let Some((parent, entries)) = stack.last_mut() {
         if progress.is_cancelled() {
             return Err(cancelled());
@@ -397,7 +416,10 @@ fn scan_inner(
                 &mut hard_links,
             );
             if let Some(directory) = entry.directory {
-                stack.push((id, take_record(&mut records, directory)?.into_iter()));
+                let (entries, errors) = take_record(&mut records, directory)?;
+                tree.nodes[id].scan.own_pending = false;
+                tree.nodes[id].scan.own_errors = errors;
+                stack.push((id, entries.into_iter()));
             }
         } else {
             stack.pop();
@@ -420,7 +442,11 @@ pub(crate) enum LiveEvent {
         parent: PathBuf,
         entries: Vec<(OsString, EntryMetadata)>,
     },
-    Errors(u64, Vec<String>),
+    DirectoryFinished {
+        path: PathBuf,
+        count: u64,
+        errors: Vec<String>,
+    },
 }
 
 #[derive(Default)]
@@ -579,6 +605,7 @@ impl LiveState {
                         append_node(tree, name, metadata, Some(parent_id), &mut self.hard_links);
                     let node = &mut tree.nodes[id];
                     let usage = node.own;
+                    let pending = node.scan.pending;
                     let owner = (node.uid, node.gid);
                     if let Some(path) = path {
                         self.directories.insert(path, id);
@@ -589,12 +616,29 @@ impl LiveState {
                     while let Some(id) = ancestor {
                         let node = &mut tree.nodes[id];
                         node.total.add(usage);
+                        node.scan.pending += pending;
                         node.owners.entry(owner).or_default().add(usage);
                         ancestor = node.parent;
                     }
                 }
             }
-            LiveEvent::Errors(count, errors) => {
+            LiveEvent::DirectoryFinished {
+                path,
+                count,
+                errors,
+            } => {
+                let id = self.directories[&path];
+                if self.cached_index.is_none() {
+                    tree.nodes[id].scan.own_pending = false;
+                    tree.nodes[id].scan.own_errors = count;
+                    let mut ancestor = Some(id);
+                    while let Some(id) = ancestor {
+                        let node = &mut tree.nodes[id];
+                        node.scan.pending = node.scan.pending.saturating_sub(1);
+                        node.scan.errors += count;
+                        ancestor = node.parent;
+                    }
+                }
                 tree.error_count += count;
                 tree.errors.extend(
                     errors
@@ -607,6 +651,8 @@ impl LiveState {
                     self.cached_index.is_some(),
                     "root is consumed before fresh live updates"
                 );
+                tree.errors.clear();
+                tree.error_count = 0;
                 self.update_cached(tree, 0, metadata);
             }
         }
@@ -616,6 +662,58 @@ impl LiveState {
 #[cfg(test)]
 mod live_tests {
     use super::*;
+
+    #[test]
+    fn completion_and_errors_propagate_to_ancestors_not_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["good", "denied"] {
+            fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let root = dir.path().canonicalize().unwrap();
+        let (mut tree, mut state) = LiveState::start(root.clone(), read_metadata(&root).unwrap());
+        state.apply(
+            &mut tree,
+            LiveEvent::Entries {
+                parent: root.clone(),
+                entries: ["good", "denied"]
+                    .map(|name| (name.into(), read_metadata(&root.join(name)).unwrap()))
+                    .into(),
+            },
+        );
+        state.apply(
+            &mut tree,
+            LiveEvent::DirectoryFinished {
+                path: root.clone(),
+                count: 0,
+                errors: vec![],
+            },
+        );
+        assert_eq!(tree.nodes[0].scan.pending, 2);
+        state.apply(
+            &mut tree,
+            LiveEvent::DirectoryFinished {
+                path: root.join("good"),
+                count: 0,
+                errors: vec![],
+            },
+        );
+        assert!(!tree.nodes[1].scan.uncertain());
+        assert_eq!(tree.nodes[0].scan.pending, 1);
+        state.apply(
+            &mut tree,
+            LiveEvent::DirectoryFinished {
+                path: root.join("denied"),
+                count: 1,
+                errors: vec!["denied".into()],
+            },
+        );
+        assert_eq!(tree.nodes[0].scan.pending, 0);
+        assert_eq!(tree.nodes[0].scan.errors, 1);
+        assert_eq!(tree.nodes[2].scan.errors, 1);
+        assert_eq!(tree.nodes[1].scan.label(), "complete");
+        tree.aggregate();
+        assert_eq!(tree.nodes[0].scan.errors, 1);
+    }
 
     #[test]
     fn live_batches_arrive_before_completion_and_reconcile_with_final_results() {

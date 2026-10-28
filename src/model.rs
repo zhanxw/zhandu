@@ -44,8 +44,32 @@ impl Filter {
     }
 }
 
+/// Subtree completeness, independent of accounting and UI focus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanState {
+    pub own_pending: bool,
+    pub own_errors: u64,
+    pub pending: u64,
+    pub errors: u64,
+}
+impl ScanState {
+    pub fn uncertain(self) -> bool {
+        self.pending > 0 || self.errors > 0
+    }
+    pub fn label(self) -> &'static str {
+        if self.pending > 0 {
+            "scanning"
+        } else if self.errors > 0 {
+            "incomplete"
+        } else {
+            "complete"
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Node {
+    pub scan: ScanState,
     pub identity: (u64, u64),
     pub name: OsString,
     pub parent: Option<usize>,
@@ -96,6 +120,8 @@ impl Tree {
     /// Children always follow parents in the arena, so reverse order is postorder.
     pub fn aggregate(&mut self) {
         for node in &mut self.nodes {
+            node.scan.pending = u64::from(node.scan.own_pending);
+            node.scan.errors = node.scan.own_errors;
             node.total = node.own;
             node.owners.clear();
             if node.is_dir {
@@ -107,6 +133,8 @@ impl Tree {
             let (before, after) = self.nodes.split_at_mut(id);
             let child = &after[0];
             let target = &mut before[parent];
+            target.scan.pending += child.scan.pending;
+            target.scan.errors += child.scan.errors;
             target.total.add(child.total);
             if child.is_dir {
                 for (&owner, &usage) in &child.owners {
@@ -235,6 +263,7 @@ mod tests {
     fn ownership_uses_descendants_not_directory_owner() {
         fn node(uid: u32, gid: u32, parent: Option<usize>, bytes: u64, is_dir: bool) -> Node {
             Node {
+                scan: ScanState::default(),
                 identity: (0, 0),
                 name: "test".into(),
                 parent,

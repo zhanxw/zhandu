@@ -69,6 +69,7 @@ pub struct App {
     scanning: bool,
     cached_refresh: bool,
     cache_age: Option<(i64, Instant)>,
+    cache_was_partial: bool,
     refresh_requested: bool,
     refresh_error: Option<String>,
     hide_zero: bool,
@@ -108,6 +109,7 @@ impl App {
             scanning: false,
             cached_refresh: false,
             cache_age: None,
+            cache_was_partial: false,
             refresh_requested: false,
             refresh_error: None,
             hide_zero: false,
@@ -206,14 +208,29 @@ impl App {
         self.directory_offset = 0;
     }
 
+    fn entry_scan(&self, item: Item) -> crate::model::ScanState {
+        let id = match item {
+            Item::Node(id) => id,
+            Item::Owner(_) | Item::AllOwners => self.owner_scope,
+            Item::SelfUsage => return crate::model::ScanState::default(),
+        };
+        self.tree.nodes[id].scan
+    }
+
     fn uncertain_usage(&self, item: Item) -> bool {
-        self.cached_refresh
-            || ((self.scanning || self.tree.error_count > 0)
-                && match item {
-                    Item::Node(id) => self.tree.nodes[id].is_dir,
-                    Item::Owner(_) | Item::AllOwners => true,
-                    Item::SelfUsage => false,
-                })
+        self.cached_refresh || self.entry_scan(item).uncertain()
+    }
+
+    fn status_label(&self, item: Item) -> String {
+        if self.cached_refresh {
+            return if self.scanning { "cached" } else { "stale" }.into();
+        }
+        let state = self.entry_scan(item);
+        if state.errors > 0 {
+            format!("{} errors", state.errors)
+        } else {
+            state.label().into()
+        }
     }
 
     fn usage_label(&self, item: Item, usage: Usage) -> String {
@@ -454,32 +471,40 @@ impl App {
                 .map(|entry| {
                     Row::new([
                         self.usage_label(entry.item, entry.usage),
+                        self.status_label(entry.item),
                         entry.name.clone(),
                     ])
                 });
             let selected = &self.rows[self.selected].name;
-            let table = Table::new(rows, [Constraint::Length(13), Constraint::Min(12)])
-                .header(
-                    Row::new(["Size", "Subdirectory"])
-                        .style(Style::default().add_modifier(Modifier::BOLD)),
-                )
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!(
-                            " {selected} · {} dirs · Tab owners ",
-                            entries.len()
-                        ))
-                        .title_bottom(format!(" Browsing {} ", self.path))
-                        .border_style(Style::default().fg(if self.directory_focus {
-                            Color::Cyan
-                        } else {
-                            Color::DarkGray
-                        })),
-                )
-                .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-                .highlight_spacing(HighlightSpacing::Always)
-                .highlight_symbol("› ");
+            let table = Table::new(
+                rows,
+                [
+                    Constraint::Length(13),
+                    Constraint::Length(12),
+                    Constraint::Min(12),
+                ],
+            )
+            .header(
+                Row::new(["Size", "Status", "Subdirectory"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(
+                        " {selected} · {} dirs · Tab owners ",
+                        entries.len()
+                    ))
+                    .title_bottom(format!(" Browsing {} ", self.path))
+                    .border_style(Style::default().fg(if self.directory_focus {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    })),
+            )
+            .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol("› ");
             let mut directory_state = TableState::default();
             if self.directory_focus && !entries.is_empty() {
                 directory_state.select(Some(self.directory_selected - self.directory_offset));
@@ -1165,9 +1190,14 @@ impl App {
         );
         let title = if self.cached_refresh {
             format!(
-                "Cache {}s old | {title}",
+                "Cache {}s old{} | {title}",
                 self.cache_age
-                    .map_or(0, |(age, since)| age + since.elapsed().as_secs() as i64)
+                    .map_or(0, |(age, since)| age + since.elapsed().as_secs() as i64),
+                if self.cache_was_partial {
+                    " (partial)"
+                } else {
+                    ""
+                }
             )
         } else {
             title
@@ -1228,8 +1258,9 @@ impl App {
                     };
                     Row::new(vec![
                         Cell::from(self.usage_label(entry.item, entry.usage)),
-                        Cell::from(if self.scanning || self.tree.error_count > 0 { "…".into() } else { format!("{percent:5.1}%") }),
+                        Cell::from(if self.scanning || self.uncertain_usage(Item::Node(self.current)) { "…".into() } else { format!("{percent:5.1}%") }),
                         Cell::from(entry.usage.inodes.to_string()),
+                        Cell::from(self.status_label(entry.item)),
                         Cell::from(format!("{}{}", if matches!(entry.item, Item::Node(id) if self.marks.contains_key(&self.tree.path(id))) { "[x] " } else { "    " }, entry.name)),
                     ])
                 });
@@ -1239,11 +1270,12 @@ impl App {
                     Constraint::Length(13),
                     Constraint::Length(8),
                     Constraint::Length(10),
+                    Constraint::Length(12),
                     Constraint::Min(12),
                 ],
             )
             .header(
-                Row::new(["Size", "%", "Inodes", "Name"])
+                Row::new(["Size", "%", "Inodes", "Status", "Name"])
                     .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(
@@ -1446,6 +1478,7 @@ pub fn run(
         app.scanning = scanning;
         app.cached_refresh = cached_age.is_some();
         app.cache_age = cached_age.map(|age| (age, Instant::now()));
+        app.cache_was_partial = cached_age.is_some() && app.tree.error_count > 0;
         app.notice = if let Some(age) = cached_age {
             format!(
                 "Cached snapshot from {age}s ago; unvisited/missing entries remain until refresh completes"
@@ -1483,6 +1516,7 @@ pub fn run(
                 );
                 app.scanning = true;
                 app.cached_refresh = true;
+                app.cache_was_partial = app.tree.error_count > 0;
                 app.refresh_error = None;
                 if app.cache_age.is_none() {
                     app.cache_age = Some((0, Instant::now()));
@@ -1604,7 +1638,14 @@ pub fn run(
                     let cache_message = match (cache, &scanned) {
                         (Ok(Some(cache)), Ok(tree)) => {
                             Some(match cache.save(tree, &worker_progress) {
-                                Ok(()) => "Cache saved".into(),
+                                Ok(()) => {
+                                    if tree.error_count > 0 {
+                                        "Partial cache saved; previous complete snapshot retained"
+                                            .into()
+                                    } else {
+                                        "Cache saved".into()
+                                    }
+                                }
                                 Err(error) => format!("Cache not saved: {error}"),
                             })
                         }
@@ -1846,6 +1887,10 @@ mod tests {
         press(&mut app, KeyCode::Char('z'));
         assert!(app.subdirectories(filter).is_empty());
         app.scanning = true;
+        for node in &mut app.tree.nodes {
+            node.scan.own_pending = node.is_dir;
+        }
+        app.tree.aggregate();
         assert_eq!(app.subdirectories(filter).len(), before);
         press(&mut app, KeyCode::Char('r'));
         assert!(!app.refresh_requested);
@@ -1881,6 +1926,8 @@ mod tests {
         let mut app = fixture_app();
         let zero = Usage::default();
         app.scanning = true;
+        app.tree.nodes[0].scan.own_pending = true;
+        app.tree.aggregate();
         assert_eq!(app.usage_label(Item::AllOwners, zero), "…");
         assert!(screen(&mut app, 160, 24).contains("Scanning - PARTIAL"));
         assert!(
@@ -1895,6 +1942,7 @@ mod tests {
         assert_eq!(app.usage_label(Item::AllOwners, zero), "…");
         assert!(screen(&mut app, 160, 24).contains("Finished with errors - PARTIAL"));
         app.tree.error_count = 0;
+        app.tree.nodes[0].scan = crate::model::ScanState::default();
         assert_eq!(app.usage_label(Item::AllOwners, zero), "0.0 B");
         assert!(screen(&mut app, 160, 24).contains("COMPLETE"));
     }

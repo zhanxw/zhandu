@@ -150,6 +150,7 @@ fn denied_directory_marks_scan_incomplete() {
     let denied = temp.path().join("denied");
     fs::create_dir(&denied).unwrap();
     fs::write(denied.join("secret"), b"test").unwrap();
+    fs::create_dir(temp.path().join("readable")).unwrap();
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
     let denied_to_process = fs::read_dir(&denied).is_err();
     let result = scan(options(temp.path(), 2), Arc::default());
@@ -158,6 +159,25 @@ fn denied_directory_marks_scan_incomplete() {
     if denied_to_process {
         assert!(tree.error_count > 0);
         assert!(!tree.errors.is_empty());
+        assert_eq!(tree.nodes[0].scan.errors, tree.error_count);
+        assert_eq!(
+            tree.nodes
+                .iter()
+                .find(|n| n.name == "denied")
+                .unwrap()
+                .scan
+                .label(),
+            "incomplete"
+        );
+        assert_eq!(
+            tree.nodes
+                .iter()
+                .find(|n| n.name == "readable")
+                .unwrap()
+                .scan
+                .label(),
+            "complete"
+        );
     } else {
         eprintln!("permission-denial assertion skipped: process can read mode-000 directory");
     }

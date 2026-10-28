@@ -1,6 +1,6 @@
 //! Transactional per-user scan snapshots. Cached data is never deletion authority.
 use crate::{
-    model::{Node, Tree, Usage},
+    model::{Node, ScanState, Tree, Usage},
     platform,
     scan::{Progress, ScanOptions},
 };
@@ -14,7 +14,7 @@ use std::{
 };
 
 const APP_ID: i64 = 0x5A445531;
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
@@ -211,8 +211,22 @@ impl Cache {
                 CREATE TABLE IF NOT EXISTS snapshots (id INTEGER PRIMARY KEY, key BLOB NOT NULL UNIQUE, started INTEGER NOT NULL, saved INTEGER NOT NULL, elapsed REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS nodes (snapshot INTEGER NOT NULL, id INTEGER NOT NULL, parent INTEGER, name BLOB NOT NULL, dev INTEGER NOT NULL, ino INTEGER NOT NULL, uid TEXT NOT NULL, gid TEXT NOT NULL, is_dir INTEGER NOT NULL, symlink INTEGER NOT NULL, shared INTEGER NOT NULL, allocated INTEGER NOT NULL, apparent INTEGER NOT NULL, inodes INTEGER NOT NULL, PRIMARY KEY(snapshot,id), FOREIGN KEY(snapshot) REFERENCES snapshots(id) ON DELETE CASCADE);
                 PRAGMA application_id=0x5A445531; PRAGMA user_version=1; COMMIT;").map_err(error)?;
-        } else if app != APP_ID || version != VERSION {
+        } else if app != APP_ID || (version != 1 && version != VERSION) {
             return Err(error("Unsupported cache database format"));
+        }
+        if version <= 1 {
+            // Preserve v1 complete snapshots; all migrations are transactional.
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                ALTER TABLE snapshots ADD COLUMN root_key BLOB;
+                UPDATE snapshots SET root_key=key;
+                ALTER TABLE snapshots ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE snapshots ADD COLUMN errors TEXT NOT NULL DEFAULT '[]';
+                ALTER TABLE nodes ADD COLUMN read_errors INTEGER NOT NULL DEFAULT 0;
+                CREATE INDEX snapshots_root ON snapshots(root_key);
+                PRAGMA user_version=2; COMMIT;",
+            )
+            .map_err(error)?;
         }
         conn.pragma_update(None, "foreign_keys", true)
             .map_err(error)?;
@@ -228,30 +242,32 @@ impl Cache {
         let tx = conn.transaction().map_err(error)?;
         let info = tx
             .query_row(
-                "SELECT id,saved,elapsed FROM snapshots WHERE key=?1",
+                "SELECT id,saved,elapsed,error_count,errors FROM snapshots WHERE root_key=?1 ORDER BY started DESC,id DESC LIMIT 1",
                 [&self.key],
                 |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, i64>(1)?,
                         r.get::<_, f64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()
             .map_err(error)?;
-        let Some((snapshot, saved, elapsed)) = info else {
+        let Some((snapshot, saved, elapsed, error_count, errors)) = info else {
             return Ok(None);
         };
         let mut tree = Tree {
             root: self.root.clone(),
             nodes: vec![],
-            errors: vec![],
-            error_count: 0,
+            errors: serde_json::from_str(&errors).map_err(error)?,
+            error_count: u64::try_from(error_count).map_err(error)?,
             elapsed_seconds: elapsed,
         };
         let mut owners = HashMap::new();
-        let mut statement = tx.prepare("SELECT id,parent,name,dev,ino,uid,gid,is_dir,symlink,shared,allocated,apparent,inodes FROM nodes WHERE snapshot=?1 ORDER BY id").map_err(error)?;
+        let mut statement = tx.prepare("SELECT id,parent,name,dev,ino,uid,gid,is_dir,symlink,shared,allocated,apparent,inodes,read_errors FROM nodes WHERE snapshot=?1 ORDER BY id").map_err(error)?;
         let mut rows = statement.query([snapshot]).map_err(error)?;
         while let Some(row) = rows.next().map_err(error)? {
             if progress.is_cancelled() {
@@ -285,6 +301,11 @@ impl Cache {
                 inodes: row.get::<_, i64>(12).map_err(error)? as u64,
             };
             let node = Node {
+                scan: ScanState {
+                    own_errors: u64::try_from(row.get::<_, i64>(13).map_err(error)?)
+                        .map_err(error)?,
+                    ..ScanState::default()
+                },
                 identity: (
                     row.get::<_, i64>(3).map_err(error)? as u64,
                     row.get::<_, i64>(4).map_err(error)? as u64,
@@ -314,13 +335,20 @@ impl Cache {
             return Err(error("Cached root no longer matches"));
         }
         tree.aggregate();
+        if tree.nodes[0].scan.errors != tree.error_count {
+            return Err(error("Inconsistent cached scan status"));
+        }
         Ok(Some((tree, now().saturating_sub(saved).max(0))))
     }
 
-    /// Replace one snapshot atomically; cancelled/incomplete scans never overwrite it.
+    /// Save complete and partial snapshots separately; interruption replaces neither.
     pub fn save(&self, tree: &Tree, progress: &Progress) -> io::Result<()> {
-        if tree.error_count != 0 || progress.is_cancelled() {
-            return Err(error("Incomplete refresh; previous cache retained"));
+        if progress.is_cancelled() || tree.nodes.iter().any(|n| n.scan.own_pending) {
+            return Err(error("Interrupted refresh; previous cache retained"));
+        }
+        let mut key = self.key.clone();
+        if tree.error_count > 0 {
+            key.extend_from_slice(b":partial");
         }
         let mut conn = self.open()?;
         let tx = conn
@@ -328,7 +356,7 @@ impl Cache {
             .map_err(error)?;
         let previous: Option<i64> = tx
             .query_row(
-                "SELECT started FROM snapshots WHERE key=?1",
+                "SELECT started FROM snapshots WHERE root_key=?1 ORDER BY started DESC LIMIT 1",
                 [&self.key],
                 |r| r.get(0),
             )
@@ -337,18 +365,22 @@ impl Cache {
         if previous.is_some_and(|started| started > self.started) {
             return Ok(());
         }
-        tx.execute("DELETE FROM snapshots WHERE key=?1", [&self.key])
+        if tree.error_count == 0 {
+            tx.execute("DELETE FROM snapshots WHERE root_key=?1", [&self.key])
+                .map_err(error)?;
+        }
+        tx.execute("DELETE FROM snapshots WHERE key=?1", [&key])
             .map_err(error)?;
         tx.execute(
-            "INSERT INTO snapshots (key,started,saved,elapsed) VALUES (?1,?2,?3,?4)",
-            params![self.key, self.started, now(), tree.elapsed_seconds],
+            "INSERT INTO snapshots (key,started,saved,elapsed,root_key,error_count,errors) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![key, self.started, now(), tree.elapsed_seconds, self.key, tree.error_count as i64, serde_json::to_string(&tree.errors).map_err(error)?],
         )
         .map_err(error)?;
         let snapshot = tx.last_insert_rowid();
         {
             let mut statement = tx
                 .prepare(
-                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    "INSERT INTO nodes VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 )
                 .map_err(error)?;
             let mut owners = HashMap::new();
@@ -376,13 +408,14 @@ impl Cache {
                         node.shared_link,
                         node.own.allocated as i64,
                         node.own.apparent as i64,
-                        node.own.inodes as i64
+                        node.own.inodes as i64,
+                        node.scan.own_errors as i64
                     ])
                     .map_err(error)?;
             }
         }
         // Retain the 16 most recently saved roots/configurations; freed pages are reused.
-        tx.execute("DELETE FROM snapshots WHERE key NOT IN (SELECT key FROM snapshots ORDER BY saved DESC,started DESC LIMIT 16)", []).map_err(error)?;
+        tx.execute("DELETE FROM snapshots WHERE root_key NOT IN (SELECT root_key FROM snapshots GROUP BY root_key ORDER BY MAX(saved) DESC,MAX(started) DESC LIMIT 16)", []).map_err(error)?;
         if progress.is_cancelled() {
             return Err(error("Cache save cancelled; previous cache retained"));
         }
@@ -501,16 +534,66 @@ mod tests {
         let cancelled = Progress::default();
         cancelled.cancel();
         assert!(cache.save(&fresh, &cancelled).is_err());
-        fresh.error_count = 1;
-        assert!(cache.save(&fresh, &Progress::default()).is_err());
         let old = cache.load(&Progress::default()).unwrap().unwrap().0;
         assert!(old.nodes.iter().any(|n| n.name == "link"));
+        fresh.error_count = 1;
+        fresh.errors = vec!["permission denied".into()];
+        fresh.nodes[0].scan.own_errors = 1;
+        fresh.aggregate();
+        cache.save(&fresh, &Progress::default()).unwrap();
+        let partial = cache.load(&Progress::default()).unwrap().unwrap().0;
+        assert_eq!(partial.error_count, 1);
+        assert_eq!(partial.nodes[0].scan.errors, 1);
+        assert_eq!(partial.errors, fresh.errors);
+        assert!(partial.nodes.iter().any(|n| n.name == "new"));
+        let conn = cache.open().unwrap();
+        let complete: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM snapshots WHERE error_count=0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(complete, 1);
         fresh.error_count = 0;
+        fresh.errors.clear();
+        fresh.nodes[0].scan.own_errors = 0;
+        fresh.aggregate();
         cache.save(&fresh, &Progress::default()).unwrap();
         let loaded = cache.load(&Progress::default()).unwrap().unwrap().0;
         assert!(!loaded.nodes.iter().any(|n| n.name == "link"));
         assert!(loaded.nodes.iter().any(|n| n.name == "new"));
         assert_eq!(loaded.nodes[0].total, fresh.nodes[0].total);
+    }
+
+    #[test]
+    fn v1_cache_migrates_without_discarding_complete_snapshot() {
+        let (_dir, options, config) = fixture();
+        let cache = Cache::new(&options, &config).unwrap().unwrap();
+        let tree = scan(options, Arc::default()).unwrap();
+        cache.save(&tree, &Progress::default()).unwrap();
+        let conn = cache.open().unwrap();
+        conn.execute_batch(
+            "DROP INDEX snapshots_root;
+            ALTER TABLE snapshots DROP COLUMN root_key;
+            ALTER TABLE snapshots DROP COLUMN error_count;
+            ALTER TABLE snapshots DROP COLUMN errors;
+            ALTER TABLE nodes DROP COLUMN read_errors;
+            PRAGMA user_version=1;",
+        )
+        .unwrap();
+        drop(conn);
+        let loaded = cache.load(&Progress::default()).unwrap().unwrap().0;
+        assert_eq!(loaded.nodes[0].total, tree.nodes[0].total);
+        assert_eq!(loaded.error_count, 0);
+        assert_eq!(
+            cache
+                .open()
+                .unwrap()
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            VERSION
+        );
     }
 
     #[test]
