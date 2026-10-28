@@ -92,6 +92,26 @@ sys.exit(code)
             assert not (path / "delete-me").exists()
             assert b"reclaimed:" in captured
             os.write(master, b"\rq")
+        elif action == "search":
+            wait_for(b"complete.")
+            os.write(master, b"u")
+            wait_for(b"All users")
+            os.write(master, b"/qx")
+            wait_for(b"x | type to filter; Enter navigate; Esc clear")
+            for _ in range(5):
+                pump()
+            assert proc.poll() is None, "search letters must not quit or delete"
+            os.write(master, b"\r\x1b")  # finish typing, clear search
+            for _ in range(5):
+                pump()
+            os.write(master, b"d/nested")
+            for _ in range(5):
+                pump()
+            assert proc.poll() is None
+            os.write(master, b"\r\x1b")
+            for _ in range(5):
+                pump()
+            os.write(master, b"q")
         elif action in ("cache_warm", "cache_refresh"):
             if action == "cache_refresh":
                 wait_for(b"CACHED")
@@ -125,6 +145,7 @@ with tempfile.TemporaryDirectory(prefix="zhandu-pty-") as tmp:
     (root / "nested").mkdir()
     (root / "nested" / "data").write_bytes(b"z" * 8192)
     session(root, "browse", 0)
+    session(root, "search", 0)
     session(root / "missing", "error", 1)
     session(root, "interrupt", 130)
     with tempfile.TemporaryDirectory(prefix="zhandu-delete-pty-") as delete_tmp:

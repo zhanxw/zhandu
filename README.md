@@ -41,7 +41,7 @@ Use the binary's absolute path from another directory to scan that directory, or
 
 The TUI opens as soon as the scan root is ready. Files, directory sizes, user/group totals, and errors update as metadata batches arrive, with screen refreshes up to five times per second. Browse and change filters while scanning; the current path and selected entry are preserved when sorting or finalizing results.
 
-`Scanning - PARTIAL` means unvisited contents are not counted yet. Zero currently means no matching usage discovered, not necessarily an empty directory. Hard links count once, but which directory receives their usage can change when the final deterministic scan replaces the preview. Marking/deletion becomes available only after scanning finishes. `q` or Ctrl-C cancels an active scan; Esc clears filters while browsing.
+`Scanning - PARTIAL` means unvisited contents are not counted yet. Provisional directory and owner totals use `~`; an uncertain zero is shown as `…`, not as an empty directory. Percentages are withheld until a scan finishes without errors. After scan errors, aggregate totals remain labeled as incomplete; press `e` for affected paths. These indicators are conservative across the scan, not per-directory completion guarantees. Hard links count once, but which directory receives their usage can change when the final deterministic scan replaces the preview. Marking/deletion becomes available only after scanning finishes. `q` or Ctrl-C cancels an active scan; Esc clears filters while browsing.
 
 Live results use a bounded update queue and an additional partial tree; memory still grows with the number of entries. JSON remains a single final report. This streams the current scan; it does not watch for later filesystem changes.
 
@@ -57,11 +57,17 @@ zhandu /shared/project --no-cache            # neither read nor write a cache
 zhandu /shared/project --cache-db /path/to/private/scans.sqlite3
 ```
 
-Default database locations:
+### Default database location
 
-- macOS: `~/Library/Caches/zhandu/scans.sqlite3`
-- Linux: `$XDG_CACHE_HOME/zhandu/scans.sqlite3`, or `~/.cache/zhandu/scans.sqlite3`
-- Windows: `%LOCALAPPDATA%\zhandu\scans.sqlite3`
+The database is stored in the current user's cache directory, independently of the directory being scanned:
+
+| Operating system | Default database path |
+| --- | --- |
+| Linux | `$XDG_CACHE_HOME/zhandu/scans.sqlite3` when `XDG_CACHE_HOME` is an absolute path; otherwise `~/.cache/zhandu/scans.sqlite3` |
+| macOS | `~/Library/Caches/zhandu/scans.sqlite3` |
+| Windows | `%LOCALAPPDATA%\zhandu\scans.sqlite3` |
+
+The database is created after the first completed, error-free scan. Use `--cache-db PATH` to choose a different database location, or `--no-cache` to disable cache reads and writes.
 
 Snapshots are keyed by canonical root path, root filesystem identity, `--exclude` settings and `--one-file-system`. User/group filters, sort order and worker count reuse the same snapshot. Raw filenames are preserved losslessly; Windows owners are stored as persistent SIDs. The 16 most recently saved root/configuration snapshots are retained. SQLite reuses freed pages; deleting the database while zhandu is closed resets the cache and reclaims its file space.
 
@@ -101,9 +107,10 @@ Use the release build for performance measurements. The first dependency downloa
 | Up / Down, or k / j | Move selection |
 | Right / Enter | From owner panel: focus directory panel; from directory panel: open selected directory |
 | Left / Backspace, or h | Parent directory; at the owner view’s starting path, return focus to owners |
-| Tab / Shift-Tab | Switch owner/directory panel focus; Tab from the full directory view opens groups |
+| Tab / Shift-Tab | Switch owner/directory panel focus; the full file view has only one panel |
 | g / u / d | Choose group / choose user / directory browser |
-| Escape | Clear both ownership filters; close help/error panel when open |
+| / | Search names or owners in the focused panel (case-insensitive substring); Enter finishes typing |
+| Escape | Close help/error panel first; otherwise clear focused-panel search before clearing both ownership filters |
 | a | Toggle allocated disk usage / apparent size |
 | s | Toggle size / name sorting |
 | Home / End, PageUp / PageDown | Navigate long lists |
@@ -112,11 +119,15 @@ Use the release build for performance measurements. The first dependency downloa
 | q | Quit |
 | Ctrl-C | Cancel / interrupt |
 
-Press **g** or **u** to choose an owner. The selector shows a **subdirectory usage preview** for the highlighted group or user; up/down changes the preview. Press **Right** or **Enter** to move the cursor into the directory panel. Up/down selects a directory there; Right/Enter opens it and Left/Backspace returns to its parent. **Tab** switches focus back to the owner list without changing the current path. The focused panel has a cyan border. Press **d** for a full file-and-directory listing with the selected filter. Each subdirectory size includes all matching descendants, regardless of the directory's own owner. Directories with zero matching usage remain visible.
+Press **g** or **u** to choose an owner. **All groups** and **All users** stay pinned at the top of the owner list; **Home**, then **Enter** selects All while retaining the other ownership filter. Reopening a picker selects the current owner. The named user and group filters are displayed below the current path; `Preview` means the highlighted owner controls the right-panel preview. The selector shows a **subdirectory usage preview** for the highlighted group or user; up/down changes the preview. Press **Right** or **Enter** to move the cursor into the directory panel. Up/down selects a directory there; Right/Enter opens it and Left/Backspace returns to its parent. **Tab** switches focus back to the owner list without changing the current path. The focused panel has a cyan border. Press **d** for a full file-and-directory listing with the selected filter. Each subdirectory size includes all matching descendants, regardless of the directory's own owner. Directories with zero matching usage remain visible.
 
-The selector appears beside the preview in wide terminals and above it in narrower terminals. Both panels scroll independently. The owner list and its totals stay anchored to the directory where you opened the selector, so the selected owner stays available even when a visited subdirectory has no matching usage. At that starting directory, Left returns focus to the owner list. A selected group and user filter combine with AND. Reopening g or u lists alternatives to the current owner while retaining the other dimension's filter. Escape clears both filters. Names resolve asynchronously. Unix numeric IDs and Windows SID strings remain visible if lookups fail. `--numeric-ids` disables display-name lookups (explicit command-line names still require resolution).
+The selector appears beside the preview in wide terminals and above it in narrower terminals. Both panels scroll independently. The owner list and its totals stay anchored to the directory where you opened the selector, so the selected owner stays available even when a visited subdirectory has no matching usage. At that starting directory, Left returns focus to the owner list. A selected group and user filter combine with AND. Reopening g or u lists alternatives to the current owner while retaining the other dimension's filter. Escape clears the focused panel’s search first, then both filters. Names resolve asynchronously. Unix numeric IDs and Windows SID strings remain visible if lookups fail. `--numeric-ids` disables display-name lookups (explicit command-line names still require resolution).
 
-The initial screen reports scan progress and supports cancellation. Browsing opens once the scan and aggregation finish. Subsequent navigation and ownership filtering use the in-memory tree and do not rescan the disk.
+The initial screen reports scan progress and supports cancellation. Browsing opens as metadata arrives, or after a saved cache loads. Subsequent navigation and ownership filtering use the in-memory tree and do not rescan the disk.
+
+Search with **/** in the focused panel, type a name or owner ID, then press **Enter** to navigate the matches. Search filters the visible list, not disk-usage totals or existing file marks. The All row remains visible during owner search. User/group pickers search independently from directory names. Entering another directory or switching views clears the directory search. Shortcut letters (including `q`, `x`, and Space) are text while typing a search. **Esc** clears it without changing the committed ownership filters.
+
+The owner panel labels its original scope; the directory panel labels the path currently being browsed. Totals may differ when these paths differ. **Tab** only changes focus in a split view; use `g` or `u` to open an owner picker from the full file listing.
 
 ## Accounting rules
 

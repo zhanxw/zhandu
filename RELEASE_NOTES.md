@@ -1,14 +1,13 @@
-**zhandu v0.4.0** adds a persistent SQLite scan cache.
+**zhandu v0.5.0** improves owner filtering, panel search, and scan status clarity.
 
-- Open previous scan results on startup, clearly labeled cached, then refresh in the background.
-- Update cached rows and add new entries while scanning; prune missing entries when refresh completes.
-- Save completed, error-free snapshots atomically, retaining the previous snapshot on interruption or failure.
-- Match caches by root identity and traversal settings; preserve Windows ownership using SIDs.
-- Enable caching by default for the TUI; add `--no-cache` and `--cache-db PATH`. JSON always scans fresh.
-- Retain the 16 most recent root/configuration snapshots; keep Unix cache files private.
-- Keep marking/deletion disabled during refresh. Cache failures fall back to live scanning.
-- SQLite is bundled. Building from source now requires Rust 1.89 or newer.
-- Install/update with `cargo install zhandu --locked`.
+- Keep All users / All groups pinned at the top of each owner picker. Home then Enter clears that filter while preserving the other.
+- Show named user and group filters beneath the current path; label owner previews and each panel's scope.
+- Search the focused panel with `/`, finish typing with Enter, and clear search with Esc before clearing ownership filters.
+- Keep directory columns aligned when panel focus changes.
+- Distinguish complete, cached-refreshing, scanning, and finished-with-errors states. Provisional aggregate sizes use `~`; uncertain zeros show `…`.
+- Keep Tab dedicated to panel focus and show context-specific keyboard hints.
+- Preserve existing caching and deletion safeguards. Search changes visible rows, not accounting totals or file marks.
+- Install/update with `cargo install zhandu --locked` (Rust 1.89 or newer).
 
 ## Downloads
 
