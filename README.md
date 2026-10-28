@@ -41,7 +41,7 @@ Use the binary's absolute path from another directory to scan that directory, or
 
 The TUI opens as soon as the scan root is ready. Files, directory sizes, user/group totals, and errors update as metadata batches arrive, with screen refreshes up to five times per second. Directory completeness updates as each branch finishes. Browse and change filters while scanning; the current path and selected entry are preserved when sorting or finalizing results.
 
-`Scanning - PARTIAL` means unvisited contents are not counted yet. Provisional directory and owner totals use `~`; an uncertain zero is shown as `…`, not as an empty directory. Percentages are withheld until a scan finishes without errors. After scan errors, aggregate totals remain labeled as incomplete; press `e` for affected paths. Each directory has a Status column: scanning, complete, or an error count. Errors propagate to ancestors without making unaffected siblings incomplete. Cached rows stay labeled cached until final reconciliation, because stale/missing children may still contribute. Hard links count once, but which directory receives their usage can change when the final deterministic scan replaces the preview. Marking/deletion becomes available only after scanning finishes. `q` or Ctrl-C cancels an active scan; Esc clears filters while browsing.
+`Scanning - PARTIAL` means unvisited contents are not counted yet. Provisional directory and owner totals use `~`; an uncertain zero is shown as `…`, not as an empty directory. Percentages are withheld until a scan finishes without errors. After scan errors, aggregate totals remain labeled as incomplete; press `e` for affected paths. Each directory has a Status column: scanning, scanned (awaiting final accounting), complete, or an error count. Live aggregate sizes remain provisional until deterministic hard-link reconciliation finishes. Errors propagate to ancestors without making unaffected siblings incomplete. Cached rows stay labeled cached until final reconciliation, because stale/missing children may still contribute. Hard links count once, but which directory receives their usage can change when the final deterministic scan replaces the preview. Marking/deletion becomes available only after scanning finishes. `q` or Ctrl-C cancels an active scan; Esc clears filters while browsing.
 
 Live results use a bounded update queue and an additional partial tree; memory still grows with the number of entries. JSON remains a single final report. This streams the current scan; it does not watch for later filesystem changes.
 
@@ -117,6 +117,7 @@ Use the release build for performance measurements. The first dependency downloa
 | s | Toggle size / name sorting |
 | Home / End, PageUp / PageDown | Navigate long lists |
 | e | Inspect scan errors; up/down scroll |
+| i | Inspect selected path, ownership, sizes, status, and marking eligibility; Esc returns |
 | ? | Help |
 | q | Quit |
 | Ctrl-C | Cancel / interrupt |
@@ -214,3 +215,5 @@ MIT licensed. Dependencies retain their own licenses.
 ### Refresh and visibility
 
 Press `r` to refresh without restarting. Browse the previous results while metadata updates. Marking and deletion stay disabled until the refresh finishes. Changed or missing marked files are unmarked; deletion still independently checks each file at confirmation. A failed refresh keeps the existing results visible as stale and allows `r` to retry, with deletion disabled. `z` hides known zero-usage entries without hiding uncertain directories or changing totals or marks. The footer always shows marked-file count and estimated reclaimable space, including when there are scan errors. Cache age remains visible during refresh and search.
+
+The list headers show matching/eligible counts. Empty searches explain how to clear the query without changing totals or marks. If the selected owner disappears after refresh, its zero-result selection remains explicit rather than changing to another owner. If the current directory disappears, navigation returns to the nearest surviving ancestor. Retargeting a root symlink defers live merging until the final tree is ready; marks outside the new root are cleared.

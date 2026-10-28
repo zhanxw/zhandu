@@ -67,10 +67,14 @@ impl ScanSession {
                 warning
             };
             // Never silently re-arm a changed file with its new identity/content.
-            let valid = if result.is_ok() {
+            let valid = if let Ok(tree) = &result {
                 marks
                     .into_iter()
-                    .filter(|m| !progress.is_cancelled() && m.revalidate().is_ok())
+                    .filter(|m| {
+                        m.path.starts_with(&tree.root)
+                            && !progress.is_cancelled()
+                            && m.revalidate().is_ok()
+                    })
                     .map(|m| m.path)
                     .collect()
             } else {

@@ -455,6 +455,7 @@ pub(crate) struct LiveState {
     hard_links: HashSet<(u64, u64)>,
     cached_index: Option<HashMap<(usize, OsString), usize>>,
     cached_links: HashMap<(u64, u64), usize>,
+    root_changed: bool,
 }
 
 impl LiveState {
@@ -569,6 +570,11 @@ impl LiveState {
     }
 
     pub fn apply(&mut self, tree: &mut Tree, event: LiveEvent) {
+        // A symlink scan root can be retargeted between refreshes. Keep the old
+        // preview intact until the new authoritative tree arrives.
+        if self.root_changed {
+            return;
+        }
         match event {
             LiveEvent::Entries { parent, entries } => {
                 let parent_id = self.directories[&parent];
@@ -646,7 +652,11 @@ impl LiveState {
                         .take(MAX_ERRORS.saturating_sub(tree.errors.len())),
                 );
             }
-            LiveEvent::Root(_, metadata) => {
+            LiveEvent::Root(root, metadata) => {
+                if root != tree.root {
+                    self.root_changed = true;
+                    return;
+                }
                 assert!(
                     self.cached_index.is_some(),
                     "root is consumed before fresh live updates"
@@ -662,6 +672,45 @@ impl LiveState {
 #[cfg(test)]
 mod live_tests {
     use super::*;
+
+    #[test]
+    fn changed_root_keeps_preview_until_final_tree_instead_of_merging_wrong_paths() {
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        let mut tree = scan(
+            ScanOptions {
+                path: old.path().into(),
+                threads: 1,
+                one_file_system: false,
+                excludes: vec![],
+            },
+            Arc::default(),
+        )
+        .unwrap();
+        let mut state = LiveState::from_cached(&tree);
+        let root = new.path().canonicalize().unwrap();
+        state.apply(
+            &mut tree,
+            LiveEvent::Root(root.clone(), read_metadata(&root).unwrap()),
+        );
+        state.apply(
+            &mut tree,
+            LiveEvent::Entries {
+                parent: root.clone(),
+                entries: vec![],
+            },
+        );
+        state.apply(
+            &mut tree,
+            LiveEvent::DirectoryFinished {
+                path: root,
+                count: 0,
+                errors: vec![],
+            },
+        );
+        assert_eq!(tree.root, old.path().canonicalize().unwrap());
+        assert!(state.root_changed);
+    }
 
     #[test]
     fn completion_and_errors_propagate_to_ancestors_not_siblings() {

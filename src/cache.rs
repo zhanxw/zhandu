@@ -343,6 +343,14 @@ impl Cache {
 
     /// Save complete and partial snapshots separately; interruption replaces neither.
     pub fn save(&self, tree: &Tree, progress: &Progress) -> io::Result<()> {
+        if tree.root != self.root
+            || tree
+                .nodes
+                .first()
+                .is_none_or(|n| n.identity != self.identity || !n.is_dir)
+        {
+            return Err(error("Scan root changed; previous cache retained"));
+        }
         if progress.is_cancelled() || tree.nodes.iter().any(|n| n.scan.own_pending) {
             return Err(error("Interrupted refresh; previous cache retained"));
         }
@@ -564,6 +572,20 @@ mod tests {
         assert!(!loaded.nodes.iter().any(|n| n.name == "link"));
         assert!(loaded.nodes.iter().any(|n| n.name == "new"));
         assert_eq!(loaded.nodes[0].total, fresh.nodes[0].total);
+    }
+
+    #[test]
+    fn changed_root_cannot_overwrite_previous_snapshot() {
+        let (_dir, options, config) = fixture();
+        let cache = Cache::new(&options, &config).unwrap().unwrap();
+        let mut tree = scan(options, Arc::default()).unwrap();
+        cache.save(&tree, &Progress::default()).unwrap();
+        tree.nodes[0].identity.1 = tree.nodes[0].identity.1.wrapping_add(1);
+        assert!(cache.save(&tree, &Progress::default()).is_err());
+        assert_eq!(
+            cache.load(&Progress::default()).unwrap().unwrap().0.nodes[0].identity,
+            cache.identity
+        );
     }
 
     #[test]

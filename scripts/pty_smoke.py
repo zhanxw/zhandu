@@ -92,6 +92,22 @@ sys.exit(code)
             assert not (path / "delete-me").exists()
             assert b"reclaimed:" in captured
             os.write(master, b"\rq")
+        elif action in ("refresh_failure", "refresh_failure_quit"):
+            wait_for(b"complete.")
+            offline = path.with_name(path.name + "-offline")
+            path.rename(offline)
+            try:
+                captured.clear()
+                os.write(master, b"r")
+                wait_for(b" - refresh failed ")
+                assert proc.poll() is None, "failed refresh must keep browsing available"
+            finally:
+                offline.rename(path)
+            if action == "refresh_failure":
+                captured.clear()
+                os.write(master, b"r")
+                wait_for(b"complete.")
+            os.write(master, b"q")
         elif action == "refresh":
             wait_for(b"complete.")
             (path / "refresh-added").write_bytes(b"new data")
@@ -155,6 +171,9 @@ with tempfile.TemporaryDirectory(prefix="zhandu-pty-") as tmp:
     session(root, "browse", 0)
     session(root, "search", 0)
     session(root, "refresh", 0)
+    (root / "failure").mkdir()
+    session(root / "failure", "refresh_failure", 0)
+    session(root / "failure", "refresh_failure_quit", 2)
     session(root / "missing", "error", 1)
     session(root, "interrupt", 130)
     with tempfile.TemporaryDirectory(prefix="zhandu-delete-pty-") as delete_tmp:

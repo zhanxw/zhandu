@@ -35,10 +35,18 @@ enum Item {
     SelfUsage,
 }
 
+#[derive(Clone)]
 struct Entry {
     item: Item,
     name: String,
     usage: Usage,
+}
+
+#[derive(Clone, Copy)]
+enum Overlay {
+    Help,
+    Errors,
+    Details,
 }
 
 pub struct App {
@@ -53,7 +61,9 @@ pub struct App {
     rows: Vec<Entry>,
     path: String,
     names: HashMap<(bool, u32), String>,
-    overlay: Option<bool>, // true: help, false: errors
+    overlay: Option<Overlay>,
+    details: String,
+    row_total: usize,
     error_scroll: u16,
     directory_focus: bool,
     directory_selected: usize,
@@ -94,6 +104,8 @@ impl App {
             path: String::new(),
             names: HashMap::new(),
             overlay: None,
+            details: String::new(),
+            row_total: 0,
             error_scroll: 0,
             directory_focus: false,
             directory_selected: 0,
@@ -218,7 +230,16 @@ impl App {
     }
 
     fn uncertain_usage(&self, item: Item) -> bool {
-        self.cached_refresh || self.entry_scan(item).uncertain()
+        // Even an enumerated branch can receive a different hard-link attribution
+        // during final deterministic reconciliation. Keep live aggregate sizes provisional.
+        self.cached_refresh
+            || self.entry_scan(item).uncertain()
+            || (self.scanning
+                && match item {
+                    Item::Node(id) => self.tree.nodes[id].is_dir,
+                    Item::Owner(_) | Item::AllOwners => true,
+                    Item::SelfUsage => false,
+                })
     }
 
     fn status_label(&self, item: Item) -> String {
@@ -228,6 +249,8 @@ impl App {
         let state = self.entry_scan(item);
         if state.errors > 0 {
             format!("{} errors", state.errors)
+        } else if self.scanning && state.pending == 0 {
+            "scanned".into()
         } else {
             state.label().into()
         }
@@ -427,7 +450,11 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(format!(" Choose {owner} · → directories "))
+                    .title(format!(
+                        " Choose {owner} · {} matches / {} owners · → ",
+                        self.rows.len().saturating_sub(1),
+                        self.row_total
+                    ))
                     .title_bottom(format!(
                         " Owners under {} ",
                         display_name(self.tree.path(self.owner_scope).as_os_str())
@@ -492,8 +519,13 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(format!(
-                        " {selected} · {} dirs · Tab owners ",
-                        entries.len()
+                        " {} shown / {} dirs · {selected} · Tab owners ",
+                        entries.len(),
+                        self.tree.nodes[self.current]
+                            .children
+                            .iter()
+                            .filter(|&&id| self.tree.nodes[id].is_dir)
+                            .count()
                     ))
                     .title_bottom(format!(" Browsing {} ", self.path))
                     .border_style(Style::default().fg(if self.directory_focus {
@@ -595,6 +627,23 @@ impl App {
                 })
                 .collect(),
         };
+        if self.view != View::Directories {
+            let active = if self.view == View::Groups {
+                self.filter.gid
+            } else {
+                self.filter.uid
+            };
+            if let Some(id) = active
+                && !self.rows.iter().any(|entry| entry.item == Item::Owner(id))
+            {
+                self.rows.push(Entry {
+                    item: Item::Owner(id),
+                    name: format!("{} (no matching entries)", self.owner_label(id)),
+                    usage: Usage::default(),
+                });
+            }
+        }
+        self.row_total = self.rows.len();
         let apparent = self.apparent;
         let sort_name = self.sort_name;
         self.rows.sort_by(|a, b| {
@@ -664,16 +713,23 @@ impl App {
                 Some(Item::Node(id)) => Some(self.tree.path(id)),
                 _ => None,
             };
+            let root_changed = self.tree.root != tree.root;
             self.tree = tree;
             self.current = 0;
             self.owner_scope = 0;
             for id in 0..self.tree.nodes.len() {
                 if self.tree.nodes[id].is_dir {
                     let path = self.tree.path(id);
-                    if path == current {
+                    if current.starts_with(&path)
+                        && path.components().count()
+                            >= self.tree.path(self.current).components().count()
+                    {
                         self.current = id;
                     }
-                    if path == scope {
+                    if scope.starts_with(&path)
+                        && path.components().count()
+                            >= self.tree.path(self.owner_scope).components().count()
+                    {
                         self.owner_scope = id;
                     }
                 }
@@ -704,6 +760,10 @@ impl App {
             } else {
                 "Scan complete. Space marks files; x reviews deletion".into()
             };
+            if root_changed {
+                self.notice
+                    .push_str(" | Scan root target changed; showing the new root");
+            }
         }
         self.rebuild();
         if let Some(target) = target
@@ -896,7 +956,9 @@ impl App {
         }
         if self.overlay.is_some() {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('e') => self.overlay = None,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('e') | KeyCode::Char('i') => {
+                    self.overlay = None
+                }
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.error_scroll = self.error_scroll.saturating_add(1)
                 }
@@ -1047,12 +1109,17 @@ impl App {
                 self.sort_name = !self.sort_name;
                 changed = true;
             }
+            KeyCode::Char('i') => {
+                self.details = self.selected_details();
+                self.overlay = Some(Overlay::Details);
+                self.error_scroll = 0;
+            }
             KeyCode::Char('?') => {
-                self.overlay = Some(true);
+                self.overlay = Some(Overlay::Help);
                 self.error_scroll = 0;
             }
             KeyCode::Char('e') => {
-                self.overlay = Some(false);
+                self.overlay = Some(Overlay::Errors);
                 self.error_scroll = 0;
             }
             _ => {}
@@ -1066,6 +1133,54 @@ impl App {
             self.rebuild();
         }
         false
+    }
+
+    fn selected_details(&self) -> String {
+        let item = if self.directory_focus {
+            self.preview_filter().and_then(|filter| {
+                self.subdirectories(filter)
+                    .get(self.directory_selected)
+                    .map(|e| e.item)
+            })
+        } else {
+            self.rows.get(self.selected).map(|e| e.item)
+        };
+        let Some(item) = item else {
+            return "No selected entry. Esc returns.".into();
+        };
+        let id = match item {
+            Item::Node(id) => id,
+            Item::SelfUsage => self.current,
+            _ => {
+                return format!(
+                    "Owner scope: {}\n{}\nSelect a directory or press d for individual files.\nEsc returns.",
+                    display_name(self.tree.path(self.owner_scope).as_os_str()),
+                    self.rows[self.selected].name
+                );
+            }
+        };
+        let node = &self.tree.nodes[id];
+        let eligibility = if self.scanning || self.cached_refresh {
+            "Marking disabled until refresh finishes."
+        } else if node.is_dir {
+            "Directories cannot be marked; open to select individual files."
+        } else if node.is_symlink {
+            "Symlinks cannot be marked."
+        } else {
+            "Space attempts to mark a regular file; current metadata and ownership are checked."
+        };
+        format!(
+            "Path: {}\nUser: {}\nGroup: {}\nStatus: {}\nAllocated (unfiltered): {}\nApparent (unfiltered): {}\nAttributed inodes: {}\nHard link counted elsewhere: {}\n\n{}\nActual reclaimed space may differ from allocated usage.\nUp/down scroll; Esc returns.",
+            display_name(self.tree.path(id).as_os_str()),
+            self.named_owner(false, node.uid),
+            self.named_owner(true, node.gid),
+            self.status_label(item),
+            human(node.total.allocated),
+            human(node.total.apparent),
+            node.total.inodes,
+            node.shared_link,
+            eligibility
+        )
     }
 
     pub fn draw(&mut self, frame: &mut Frame) {
@@ -1207,9 +1322,11 @@ impl App {
                 .block(Block::default().borders(Borders::ALL).title(title)),
             areas[0],
         );
-        if let Some(help) = self.overlay {
-            let text = if help {
-                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng: choose group   u: choose user   d: directories   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nDirectory panel: →/Enter opens, ← goes up (at starting path: owners).\nTab switches focus in owner views; d opens files with the same filter.\nAll stays pinned. Owner totals use the labeled scope; browsing may be deeper.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. q exits without deleting marks.\nEsc closes this panel.".to_owned()
+        if let Some(overlay) = self.overlay {
+            let text = if matches!(overlay, Overlay::Details) {
+                self.details.clone()
+            } else if matches!(overlay, Overlay::Help) {
+                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng: choose group   u: choose user   d: directories   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: quit\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nDirectory panel: →/Enter opens, ← goes up (at starting path: owners).\nTab switches focus in owner views; d opens files with the same filter.\nAll stays pinned. Owner totals use the labeled scope; browsing may be deeper.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. q exits without deleting marks.\nEsc closes this panel.".to_owned()
             } else if self.tree.errors.is_empty() {
                 "No scan errors.".to_owned()
             } else {
@@ -1224,10 +1341,10 @@ impl App {
                 Paragraph::new(text)
                     .wrap(Wrap { trim: false })
                     .scroll((self.error_scroll, 0))
-                    .block(Block::default().borders(Borders::ALL).title(if help {
-                        " Help "
-                    } else {
-                        " Scan errors "
+                    .block(Block::default().borders(Borders::ALL).title(match overlay {
+                        Overlay::Help => " Help ",
+                        Overlay::Errors => " Scan errors ",
+                        Overlay::Details => " Details (snapshot at opening) ",
                     })),
                 areas[1],
             );
@@ -1278,11 +1395,11 @@ impl App {
                 Row::new(["Size", "%", "Inodes", "Status", "Name"])
                     .style(Style::default().add_modifier(Modifier::BOLD)),
             )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {} entries ", self.rows.len())),
-            )
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                " {} shown / {} eligible entries ",
+                self.rows.len(),
+                self.row_total
+            )))
             .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
             .highlight_spacing(HighlightSpacing::Always)
             .highlight_symbol("› ");
@@ -1291,6 +1408,18 @@ impl App {
                 state.select(Some(self.selected - self.offset));
             }
             frame.render_stateful_widget(table, areas[1], &mut state);
+            if self.rows.is_empty() {
+                let inner = Block::default().borders(Borders::ALL).inner(areas[1]);
+                frame.render_widget(
+                    Paragraph::new(if !self.directory_search.is_empty() {
+                        "No search matches. Esc clears search; totals and marks are unchanged."
+                    } else {
+                        "No visible entries. z shows zeros; Esc clears ownership filters."
+                    })
+                    .wrap(Wrap { trim: false }),
+                    inner,
+                );
+            }
         }
         let active = self.preview_filter().unwrap_or(self.filter);
         let usage = self.tree.nodes[self.current].usage(active);
@@ -1549,6 +1678,8 @@ pub fn run(
                         match result {
                             Ok(tree) => {
                                 app.refresh_scan(Some(tree));
+                                let valid: std::collections::HashSet<_> =
+                                    valid.into_iter().collect();
                                 app.marks.retain(|path, _| valid.contains(path));
                                 if old_marks != app.marks.len() {
                                     app.notice.push_str(&format!(
@@ -1701,11 +1832,16 @@ pub fn run(
                                 progress.cancel();
                                 return Ok(130);
                             }
-                            return Ok(if app.deletion_errors || app.tree.error_count > 0 {
-                                2
-                            } else {
-                                0
-                            });
+                            return Ok(
+                                if app.deletion_errors
+                                    || app.tree.error_count > 0
+                                    || app.refresh_error.is_some()
+                                {
+                                    2
+                                } else {
+                                    0
+                                },
+                            );
                         }
                         dirty = true;
                     }
@@ -1875,6 +2011,56 @@ mod tests {
         assert!(screen(&mut app, 80, 24).contains("Search names:"));
         press(&mut app, KeyCode::Esc);
         assert!(!app.rows.is_empty());
+    }
+
+    #[test]
+    fn disappearing_owner_does_not_change_active_filter() {
+        let mut app = fixture_app();
+        press(&mut app, KeyCode::Right);
+        let filter = app.filter;
+        for node in &mut app.tree.nodes {
+            if node.uid == 3 {
+                node.uid = 999;
+            }
+        }
+        app.tree.aggregate();
+        app.refresh_scan(None);
+        assert_eq!(app.preview_filter(), Some(filter));
+        assert!(app.rows[app.selected].name.contains("no matching entries"));
+        press(&mut app, KeyCode::Char('i'));
+        assert!(matches!(app.overlay, Some(Overlay::Details)));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn removed_current_directory_returns_to_nearest_surviving_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        let options = ScanOptions {
+            path: dir.path().into(),
+            threads: 1,
+            one_file_system: false,
+            excludes: vec![],
+        };
+        let tree = scan(options.clone(), Arc::default()).unwrap();
+        let mut app = App::new(tree, Filter::default(), View::Directories, false);
+        app.current = app.tree.nodes.iter().position(|n| n.name == "b").unwrap();
+        app.rebuild();
+        std::fs::remove_dir(dir.path().join("a/b")).unwrap();
+        app.refresh_scan(Some(scan(options, Arc::default()).unwrap()));
+        assert_eq!(
+            app.tree.path(app.current),
+            dir.path().canonicalize().unwrap().join("a")
+        );
+        app.selected = app
+            .rows
+            .iter()
+            .position(|e| e.item == Item::SelfUsage)
+            .unwrap();
+        let details = app.selected_details();
+        assert!(details.contains("Directories cannot be marked"));
+        assert!(details.contains("Allocated (unfiltered)"));
     }
 
     #[test]
