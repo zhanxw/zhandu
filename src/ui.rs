@@ -67,6 +67,7 @@ pub struct App {
     deletion_errors: bool,
     scanning: bool,
     cached_refresh: bool,
+    cache_age: Option<(i64, Instant)>,
     live_directory_anchor: Option<Item>,
     owner_search: String,
     directory_search: String,
@@ -102,6 +103,7 @@ impl App {
             deletion_errors: false,
             scanning: false,
             cached_refresh: false,
+            cache_age: None,
             live_directory_anchor: None,
             owner_search: String::new(),
             directory_search: String::new(),
@@ -652,7 +654,11 @@ impl App {
             });
             self.scanning = false;
             self.cached_refresh = false;
-            self.notice = "Scan complete. Space marks files; x reviews deletion".into();
+            self.notice = if self.tree.error_count > 0 {
+                "Scan finished with errors; e shows affected paths. Totals may be incomplete".into()
+            } else {
+                "Scan complete. Space marks files; x reviews deletion".into()
+            };
         }
         self.rebuild();
         if let Some(target) = target
@@ -1120,6 +1126,15 @@ impl App {
                 ""
             }
         );
+        let title = if self.cached_refresh {
+            format!(
+                "Cache {}s old | {title}",
+                self.cache_age
+                    .map_or(0, |(age, since)| age + since.elapsed().as_secs() as i64)
+            )
+        } else {
+            title
+        };
         frame.render_widget(
             Paragraph::new(format!("{}\n{}", self.path, filters))
                 .block(Block::default().borders(Borders::ALL).title(title)),
@@ -1210,20 +1225,16 @@ impl App {
         }
         let active = self.preview_filter().unwrap_or(self.filter);
         let usage = self.tree.nodes[self.current].usage(active);
-        let activity = if self.scanning {
-            "Mark/delete disabled until refresh finishes. ~ provisional; … unknown.".into()
-        } else if self.tree.error_count > 0 {
-            format!(
-                "{} errors: e details. ~ incomplete totals; … unknown.",
-                self.tree.error_count
-            )
-        } else {
-            format!(
-                "Marked {} files | est. reclaimable {} | Space mark  x review  c clear marks",
-                self.marks.len(),
-                human(deletion::estimate(self.marks.values()))
-            )
-        };
+        let activity = format!(
+            "Marked {} files | est. reclaimable {} | {}",
+            self.marks.len(),
+            human(deletion::estimate(self.marks.values())),
+            if self.scanning || self.cached_refresh {
+                "mark/delete disabled during refresh"
+            } else {
+                "Space mark  x review  c clear"
+            }
+        );
         let search = if self.editing_search || !self.search_query().is_empty() {
             format!(
                 "Search {}: /{} | {}",
@@ -1240,8 +1251,11 @@ impl App {
                 }
             )
         } else if self.cached_refresh {
-            "Cached + fresh values: unvisited/deleted entries remain until refresh completes."
-                .into()
+            format!(
+                "Cache: {}s old | Refreshing; unvisited entries may be stale",
+                self.cache_age
+                    .map_or(0, |(age, since)| age + since.elapsed().as_secs() as i64)
+            )
         } else {
             self.notice.lines().next().unwrap_or("").into()
         };
@@ -1414,6 +1428,7 @@ pub fn run(
         let mut app = App::new(tree, filter, view, apparent);
         app.scanning = scanning;
         app.cached_refresh = cached_age.is_some();
+        app.cache_age = cached_age.map(|age| (age, Instant::now()));
         app.notice = if let Some(age) = cached_age {
             format!(
                 "Cached snapshot from {age}s ago; unvisited/missing entries remain until refresh completes"
@@ -1760,6 +1775,21 @@ mod tests {
         assert!(screen(&mut app, 80, 24).contains("Search names:"));
         press(&mut app, KeyCode::Esc);
         assert!(!app.rows.is_empty());
+    }
+
+    #[test]
+    fn marks_and_cache_age_remain_visible_with_errors_and_search() {
+        let mut app = fixture_app();
+        app.tree.error_count = 2;
+        assert!(screen(&mut app, 120, 24).contains("Marked 0 files"));
+        app.cached_refresh = true;
+        app.scanning = true;
+        app.cache_age = Some((3600, Instant::now()));
+        type_search(&mut app, "missing");
+        let text = screen(&mut app, 80, 24);
+        assert!(text.contains("Cache 3600s old"));
+        assert!(text.contains("Marked 0 files"));
+        assert!(text.contains("Search owners:"));
     }
 
     #[test]
