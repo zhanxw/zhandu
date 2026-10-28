@@ -86,6 +86,7 @@ pub struct App {
     refresh_error: Option<String>,
     hide_zero: bool,
     size_colors: bool,
+    show_percentage: bool,
     live_directory_anchor: Option<Item>,
     owner_search: String,
     directory_search: String,
@@ -135,6 +136,7 @@ impl App {
             refresh_error: None,
             hide_zero: false,
             size_colors: true,
+            show_percentage: true,
             live_directory_anchor: None,
             owner_search: String::new(),
             directory_search: String::new(),
@@ -502,6 +504,28 @@ impl App {
         true
     }
 
+    fn percentage_column<T>(&self, mut columns: Vec<T>, percentage: T) -> Vec<T> {
+        if self.show_percentage {
+            columns.insert(1, percentage);
+        }
+        columns
+    }
+
+    fn percentage_cell(&self, usage: Usage, total: u64) -> Cell<'static> {
+        Cell::from(
+            if self.scanning || self.uncertain_usage(Item::Node(self.current)) {
+                "…".into()
+            } else {
+                let percent = if total == 0 {
+                    0.0
+                } else {
+                    usage.bytes(self.apparent) as f64 / total as f64 * 100.0
+                };
+                format!("{percent:5.1}%")
+            },
+        )
+    }
+
     fn size_cell(&self, entry: &Entry) -> Cell<'static> {
         let bytes = entry.usage.bytes(self.apparent);
         let style = if !self.size_colors || bytes < 1 << 30 {
@@ -542,43 +566,57 @@ impl App {
         } else {
             "user"
         };
+        let owner_total = self
+            .rows
+            .first()
+            .map_or(0, |entry| entry.usage.bytes(self.apparent));
         let rows = visible.iter().map(|&index| {
             let entry = &self.rows[index];
-            Row::new([self.size_cell(entry), Cell::from(entry.name.clone())])
+            Row::new(self.percentage_column(
+                vec![self.size_cell(entry), Cell::from(entry.name.clone())],
+                self.percentage_cell(entry.usage, owner_total),
+            ))
         });
-        let table = Table::new(rows, [Constraint::Length(13), Constraint::Min(12)])
-            .header(
-                Row::new(["Total", "Owner"]).style(Style::default().add_modifier(Modifier::BOLD)),
-            )
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(
-                        " {owner} · u Users / g Groups · {} / {} ",
-                        self.rows.len().saturating_sub(1),
-                        self.row_total
-                    ))
-                    .title_bottom(format!(
-                        " Owners under {} ",
-                        display_name(self.tree.path(self.owner_scope).as_os_str())
-                    ))
-                    .border_style(Style::default().fg(if self.directory_focus {
-                        Color::DarkGray
-                    } else {
-                        Color::Cyan
-                    })),
-            )
-            .row_highlight_style(
-                Style::default()
-                    .bg(if self.directory_focus {
-                        Color::Black
-                    } else {
-                        Color::DarkGray
-                    })
-                    .fg(Color::White),
-            )
-            .highlight_spacing(HighlightSpacing::Always)
-            .highlight_symbol(if self.directory_focus { "  " } else { "› " });
+        let table = Table::new(
+            rows,
+            self.percentage_column(
+                vec![Constraint::Length(13), Constraint::Min(12)],
+                Constraint::Length(8),
+            ),
+        )
+        .header(
+            Row::new(self.percentage_column(vec!["Total", "Owner"], "%"))
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    " {owner} · u Users / g Groups · {} / {} ",
+                    self.rows.len().saturating_sub(1),
+                    self.row_total
+                ))
+                .title_bottom(format!(
+                    " Owners under {} ",
+                    display_name(self.tree.path(self.owner_scope).as_os_str())
+                ))
+                .border_style(Style::default().fg(if self.directory_focus {
+                    Color::DarkGray
+                } else {
+                    Color::Cyan
+                })),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(if self.directory_focus {
+                    Color::Black
+                } else {
+                    Color::DarkGray
+                })
+                .fg(Color::White),
+        )
+        .highlight_spacing(HighlightSpacing::Always)
+        .highlight_symbol(if self.directory_focus { "  " } else { "› " });
         let mut state = TableState::default();
         if !self.rows.is_empty() {
             state.select(visible.iter().position(|&index| index == self.selected));
@@ -586,6 +624,9 @@ impl App {
         frame.render_stateful_widget(table, panes[0], &mut state);
         if let Some(filter) = self.preview_filter() {
             let entries = self.browser_entries(filter);
+            let total = self.tree.nodes[self.current]
+                .usage(filter)
+                .bytes(self.apparent);
             let height = panes[1].height.saturating_sub(3).max(1) as usize;
             self.directory_selected = self.directory_selected.min(entries.len().saturating_sub(1));
             if self.directory_selected < self.directory_offset {
@@ -599,31 +640,37 @@ impl App {
                 .skip(self.directory_offset)
                 .take(height)
                 .map(|entry| {
-                    Row::new([
+                    Row::new(self.percentage_column(vec![
                         self.size_cell(entry),
                         Cell::from(self.status_label(entry.item)),
                         Cell::from(format!("{}{}", if matches!(entry.item, Item::Node(id) if self.marks.contains_key(&self.tree.path(id))) { "[x] " } else if self.show_files { "    " } else { "" }, entry.name)),
-                    ])
+                    ], self.percentage_cell(entry.usage, total)))
                 });
             let selected = &self.rows[self.selected].name;
             let table = Table::new(
                 rows,
-                [
-                    Constraint::Length(13),
-                    Constraint::Length(12),
-                    Constraint::Min(12),
-                ],
+                self.percentage_column(
+                    vec![
+                        Constraint::Length(13),
+                        Constraint::Length(12),
+                        Constraint::Min(12),
+                    ],
+                    Constraint::Length(8),
+                ),
             )
             .header(
-                Row::new([
-                    "Size",
-                    "Status",
-                    if self.show_files {
-                        "Name"
-                    } else {
-                        "Subdirectory"
-                    },
-                ])
+                Row::new(self.percentage_column(
+                    vec![
+                        "Size",
+                        "Status",
+                        if self.show_files {
+                            "Name"
+                        } else {
+                            "Subdirectory"
+                        },
+                    ],
+                    "%",
+                ))
                 .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(
@@ -1178,6 +1225,9 @@ impl App {
                     self.notice = "Refresh already running".into();
                 }
             }
+            KeyCode::Char('p') => {
+                self.show_percentage = !self.show_percentage;
+            }
             KeyCode::Char('C') => {
                 self.size_colors = !self.size_colors;
                 self.notice = format!(
@@ -1419,7 +1469,7 @@ impl App {
             let text = if matches!(overlay, Overlay::Details) {
                 self.details.clone()
             } else if matches!(overlay, Overlay::Help) {
-                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng/u: focus Groups/Users   d: toggle files   v: toggle one/two panels   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\nShift+C: toggle size colors (yellow >=1 GiB; red >=100 GiB)\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: close panel / quit browser\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nBrowser: →/Enter opens directories; ←/Backspace always goes up (root stops).\nTab switches focus in two-panel mode. d never changes layout or focus.\nAll stays pinned. Both panels describe the current path; filters persist.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. In the browser, q exits without deleting marks.\nq or Esc closes this panel.".to_owned()
+                "↑/↓ or j/k: select     →/Enter: open directory / filter owner\n←/Backspace: parent     Tab: switch panels (in owner view)\ng/u: focus Groups/Users   d: toggle files   v: toggle one/two panels   Esc: clear search first, then BOTH filters\n/: search focused panel; Enter finishes typing; Esc clears search\nHome in owners: All users/groups (clears only that filter)\n~ provisional/incomplete size; … unknown; e shows scan errors\na: allocated / apparent size    s: size / name sort\np: show/hide percentages (share of panel total)\nShift+C: toggle size colors (yellow >=1 GiB; red >=100 GiB)\nr: refresh (preserve navigation; revalidate marks)   z: hide/show known zero usage\nHome/End, PageUp/PageDown: move   e: errors   i: details   ?: help   q: close panel / quit browser\n\nOwner panel: →/Enter focuses directories. ↑↓ selects within the focused panel.\nBrowser: →/Enter opens directories; ←/Backspace always goes up (root stops).\nTab switches focus in two-panel mode. d never changes layout or focus.\nAll stays pinned. Both panels describe the current path; filters persist.\nOwners: Unix UID/GID or Windows owner/primary-group SID. Filters combine.\nTotals include directory blocks and symlinks, and include hidden files.\nHard links count once at their first sorted depth-first scan location.\n@ marks a symlink (not followed). Allocated bytes are not reclaimable bytes.\n\nSpace toggles a regular file mark and advances. c clears all marks.\nx reviews ALL marks; type DELETE and Enter to permanently delete.\nDirectories and symlinks cannot be marked. In the browser, q exits without deleting marks.\nq or Esc closes this panel.".to_owned()
             } else if self.tree.errors.is_empty() {
                 "No scan errors.".to_owned()
             } else {
@@ -1460,32 +1510,27 @@ impl App {
                 .skip(self.offset)
                 .take(height)
                 .map(|entry| {
-                    let bytes = entry.usage.bytes(self.apparent);
-                    let percent = if total == 0 {
-                        0.0
-                    } else {
-                        bytes as f64 / total as f64 * 100.0
-                    };
-                    Row::new(vec![
+                    Row::new(self.percentage_column(vec![
                         self.size_cell(entry),
-                        Cell::from(if self.scanning || self.uncertain_usage(Item::Node(self.current)) { "…".into() } else { format!("{percent:5.1}%") }),
                         Cell::from(entry.usage.inodes.to_string()),
                         Cell::from(self.status_label(entry.item)),
                         Cell::from(format!("{}{}", if matches!(entry.item, Item::Node(id) if self.marks.contains_key(&self.tree.path(id))) { "[x] " } else { "    " }, entry.name)),
-                    ])
+                    ], self.percentage_cell(entry.usage, total)))
                 });
             let table = Table::new(
                 rows,
-                [
-                    Constraint::Length(13),
+                self.percentage_column(
+                    vec![
+                        Constraint::Length(13),
+                        Constraint::Length(10),
+                        Constraint::Length(12),
+                        Constraint::Min(12),
+                    ],
                     Constraint::Length(8),
-                    Constraint::Length(10),
-                    Constraint::Length(12),
-                    Constraint::Min(12),
-                ],
+                ),
             )
             .header(
-                Row::new(["Size", "%", "Inodes", "Status", "Name"])
+                Row::new(self.percentage_column(vec!["Size", "Inodes", "Status", "Name"], "%"))
                     .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(Block::default().borders(Borders::ALL).title(format!(
@@ -1581,7 +1626,7 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(status).block(Block::default().borders(Borders::ALL).title(format!(
-                " v: {} panel{} | d: {} | Shift+C: colors {} ",
+                " v: {} panel{} | d: {} | p: % {} | Shift+C: colors {} ",
                 if self.view == View::Directories {
                     "two"
                 } else {
@@ -1597,6 +1642,7 @@ impl App {
                 } else {
                     "show files"
                 },
+                if self.show_percentage { "on" } else { "off" },
                 if self.size_colors { "on" } else { "off" }
             ))),
             areas[2],
@@ -2031,6 +2077,68 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn percentages_toggle_in_both_layouts_without_changing_selection_or_filters() {
+        let mut app = fixture_app();
+        for view in [View::Users, View::Groups, View::Directories] {
+            app.view = view;
+            app.rebuild();
+            let filter = app.filter;
+            let current = app.current;
+            let selected = app.selected;
+            for (width, height) in [(160, 40), (80, 40)] {
+                assert!(screen(&mut app, width, height).matches('%').count() > 1);
+                press(&mut app, KeyCode::Char('p'));
+                // Only the footer toggle hint retains a percent sign.
+                assert_eq!(screen(&mut app, width, height).matches('%').count(), 1);
+                assert_eq!(app.filter, filter);
+                assert_eq!(app.current, current);
+                assert_eq!(app.selected, selected);
+                press(&mut app, KeyCode::Char('p'));
+            }
+        }
+        type_search(&mut app, "p");
+        assert!(app.show_percentage);
+    }
+
+    #[test]
+    fn percentage_values_follow_metric_and_hide_incomplete_totals() {
+        let mut app = fixture_app();
+        let usage = Usage {
+            allocated: 25,
+            apparent: 50,
+            inodes: 1,
+        };
+        let render = |app: &App, total| {
+            let mut terminal = Terminal::new(TestBackend::new(10, 1)).unwrap();
+            terminal
+                .draw(|f| {
+                    f.render_widget(
+                        Table::new(
+                            [Row::new([app.percentage_cell(usage, total)])],
+                            [Constraint::Min(1)],
+                        ),
+                        f.area(),
+                    )
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+        assert!(render(&app, 100).contains("25.0%"));
+        app.apparent = true;
+        assert!(render(&app, 100).contains("50.0%"));
+        assert!(render(&app, 0).contains("0.0%"));
+        app.scanning = true;
+        assert!(render(&app, 100).contains('…'));
+        assert!(!render(&app, 100).contains('%'));
     }
 
     #[test]

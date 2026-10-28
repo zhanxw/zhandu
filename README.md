@@ -121,6 +121,7 @@ Use the release build for performance measurements. The first dependency downloa
 | e | Inspect scan errors; up/down scroll |
 | i | Inspect selected path, ownership, sizes, status, and marking eligibility; Esc returns |
 | ? | Help |
+| p | Show/hide percentage columns in both panels (shown by default) |
 | Shift+C | Toggle size colors (on by default): yellow ≥1 GiB, red ≥100 GiB; uses allocated/apparent size mode |
 | q | Close help/error/details when open; otherwise quit the browser |
 | Ctrl-C | Cancel / interrupt |
@@ -222,3 +223,5 @@ MIT licensed. Dependencies retain their own licenses.
 Press `r` to refresh without restarting. Browse the previous results while metadata updates. Marking and deletion stay disabled until the refresh finishes. Changed or missing marked files are unmarked; deletion still independently checks each file at confirmation. A failed refresh keeps the existing results visible as stale and allows `r` to retry, with deletion disabled. `z` hides known zero-usage entries without hiding uncertain directories or changing totals or marks. The footer always shows marked-file count and estimated reclaimable space, including when there are scan errors. Cache age remains visible during refresh and search.
 
 The list headers show matching/eligible counts. Empty searches explain how to clear the query without changing totals or marks. If the selected owner disappears after refresh, its zero-result selection remains explicit rather than changing to another owner. If the current directory disappears, navigation returns to the nearest surviving ancestor. Retargeting a root symlink defers live merging until the final tree is ready; marks outside the new root are cleared.
+
+Percentages use the current directory’s filtered total in the browser and the All users/groups total in the owner panel. Search and hiding files do not change the denominator. Percentages follow allocated/apparent mode; incomplete or scanning totals show `…`.

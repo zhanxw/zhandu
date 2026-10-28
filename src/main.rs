@@ -24,7 +24,7 @@ enum View {
 #[command(
     version,
     about = "Fast disk usage explorer with group and user totals",
-    after_help = "Keys: arrows navigate; g/u opens owner panels; v toggles single/two panels; d toggles files; Right/Enter focuses the browser or opens a directory; Left goes to parent; Tab switches panels; r refreshes; z toggles zero usage; i shows details; Home in owners selects All; / searches the focused panel; Space marks files; x reviews deletion; c clears marks; Esc clears search, then filters; a toggles size; s sorts; e shows errors; ? help; q quits.\nExit codes: 0 complete, 1 fatal error, 2 incomplete scan/deletion, 130 cancelled."
+    after_help = "Keys: arrows navigate; g/u opens owner panels; v toggles single/two panels; d toggles files; p toggles percentages; Shift+C toggles size colors; Right/Enter focuses the browser or opens a directory; Left goes to parent; Tab switches panels; r refreshes; z toggles zero usage; i shows details; Home in owners selects All; / searches the focused panel; Space marks files; x reviews deletion; c clears marks; Esc clears search, then filters; a toggles size; s sorts; e shows errors; ? help; q quits.\nExit codes: 0 complete, 1 fatal error, 2 incomplete scan/deletion, 130 cancelled."
 )]
 struct Args {
     /// Directory to scan (includes hidden files; root symlinks are resolved)
