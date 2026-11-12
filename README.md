@@ -12,9 +12,37 @@ A fast disk usage explorer written in Rust for **Windows, Linux, and macOS**. Sc
 
 ## Run
 
-Download and extract the archive for your platform, then run `zhandu` (`zhandu.exe` in Windows PowerShell). Release archives contain documentation, licenses, and an optimized executable. Verify downloads against the release’s `SHA256SUMS`.
+Install or upgrade the latest prebuilt binary without Cargo/Rust:
 
-Install from crates.io with `cargo install zhandu --locked`.
+**macOS / Linux** (Intel/x64 or ARM64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zhanxw/zhandu/main/install.sh | sh
+```
+
+**Windows x64** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/zhanxw/zhandu/main/install.ps1 | iex
+```
+
+Run the same command again to upgrade. Downloads are verified against the release's SHA-256 manifest before replacing the executable. No administrator access is required. Close zhandu before upgrading on Windows.
+
+On macOS/Linux the default destination is `~/.local/bin`. If it is not already on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell configuration (`~/.zshrc` or `~/.bashrc`) and run it in your current terminal. Windows installs to `%LOCALAPPDATA%\zhandu\bin` and adds it to your user and current PowerShell PATH.
+
+Set `ZHANDU_INSTALL_DIR` to choose another destination, or `ZHANDU_VERSION` to pin a release such as `v0.6.1`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zhanxw/zhandu/main/install.sh | ZHANDU_VERSION=v0.6.1 sh
+```
+
+Linux binaries require glibc 2.35+ on x64 or 2.39+ on ARM64; Alpine/musl needs a source build. Other Windows architectures are not included in the binary installer.
+
+Alternatively, [download an archive](https://github.com/zhanxw/zhandu/releases/latest) manually, or install/upgrade on any supported OS with Rust installed:
+
+```sh
+cargo install zhandu --locked
+```
 
 `-g GROUP` (or `--group GROUP`) counts only entries owned by that group, including matching files inside directories owned by other groups. It accepts group names or Unix GIDs; on Windows, use a primary-group account name or SID. The filter applies to both TUI and JSON totals.
 
