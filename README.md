@@ -249,3 +249,5 @@ Press `r` to refresh without restarting. Browse the previous results while metad
 The list headers show matching/eligible counts. Empty searches explain how to clear the query without changing totals or marks. If the selected owner disappears after refresh, its zero-result selection remains explicit rather than changing to another owner. If the current directory disappears, navigation returns to the nearest surviving ancestor. Retargeting a root symlink defers live merging until the final tree is ready; marks outside the new root are cleared.
 
 Percentages use the current directory’s filtered total in the browser and the All users/groups total in the owner panel. Search and hiding files do not change the denominator. Percentages follow allocated/apparent mode; incomplete or scanning totals show `…`.
+
+If a runner change prevents a tagged release from building, dispatch the build workflow from `main` with `release_tag` set to the existing version tag. This rebuilds the tagged source using the current workflow without moving the tag. Published releases are never overwritten.
