@@ -6,7 +6,8 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('zhandu-installer-' + [guid]::NewG
 $originalDir = $env:ZHANDU_INSTALL_DIR
 $originalVersion = $env:ZHANDU_VERSION
 $version = 'v' + ((& $Binary --version) -replace '^zhandu ', '')
-$script:fixtureVersion = $version
+$originalFixtures = $env:ZHANDU_TEST_FIXTURES
+$env:ZHANDU_TEST_FIXTURES = $root
 $folder = "zhandu-$version-x86_64-pc-windows-msvc"
 $archive = "$folder.zip"
 New-Item -ItemType Directory -Path (Join-Path $root $folder) -Force | Out-Null
@@ -15,15 +16,18 @@ Compress-Archive -Path (Join-Path $root $folder) -DestinationPath (Join-Path $ro
 $manifest = Join-Path $root 'SHA256SUMS'
 $hash = (Get-FileHash (Join-Path $root $archive) -Algorithm SHA256).Hash
 Set-Content $manifest "$hash  $archive"
+Set-Content (Join-Path $root 'version') $version
 # Replace only the download transport; exercise the actual installer/executable.
 function Invoke-WebRequest {
     param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
+    $fixtureRoot = $env:ZHANDU_TEST_FIXTURES
+    $fixtureVersion = (Get-Content (Join-Path $fixtureRoot 'version')).Trim()
     if (-not $Uri.StartsWith('https://github.com/zhanxw/zhandu/releases/')) { throw 'Unexpected URL' }
     if ($Uri.EndsWith('/latest')) {
-        return [pscustomobject]@{BaseResponse=[pscustomobject]@{ResponseUri=[uri]"https://github.com/zhanxw/zhandu/releases/tag/$script:fixtureVersion"}}
+        return [pscustomobject]@{BaseResponse=[pscustomobject]@{ResponseUri=[uri]"https://github.com/zhanxw/zhandu/releases/tag/$fixtureVersion"}}
     }
-    if (-not $Uri.Contains("/download/$script:fixtureVersion/")) { throw 'Missing release' }
-    Copy-Item (Join-Path $root ($Uri.Split('/')[-1])) $OutFile
+    if (-not $Uri.Contains("/download/$fixtureVersion/")) { throw 'Missing release' }
+    Copy-Item (Join-Path $fixtureRoot ($Uri.Split('/')[-1])) $OutFile
 }
 function Assert-Installed {
     if ((& (Join-Path $env:ZHANDU_INSTALL_DIR 'zhandu.exe') --version) -ne "zhandu $($version.Substring(1))") { throw 'Wrong installed version' }
@@ -60,6 +64,7 @@ try {
     if (@(Get-ChildItem $env:ZHANDU_INSTALL_DIR).Count -ne 1) { throw 'Staged files were not cleaned up' }
     Write-Host 'PASS: install, upgrade, reinstall, pinning, invalid version, missing downloads, checksum rejection, preservation, cleanup'
 } finally {
+    $env:ZHANDU_TEST_FIXTURES = $originalFixtures
     $env:ZHANDU_INSTALL_DIR = $originalDir
     $env:ZHANDU_VERSION = $originalVersion
     Remove-Item $root -Recurse -Force

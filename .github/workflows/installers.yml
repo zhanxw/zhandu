@@ -1,0 +1,42 @@
+name: Binary installers
+on:
+  push:
+    branches: [main]
+    paths: ['install.sh', 'install.ps1', 'scripts/test_install*', '.github/workflows/installers.yml']
+  pull_request:
+    paths: ['install.sh', 'install.ps1', 'scripts/test_install*', '.github/workflows/installers.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  installer:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Test Unix install and upgrade
+        if: runner.os != 'Windows'
+        run: |
+          python3 scripts/test_install_sh.py
+          export ZHANDU_INSTALL_DIR="$RUNNER_TEMP/zhandu-live-install"
+          sh install.sh
+          sh install.sh
+          "$ZHANDU_INSTALL_DIR/zhandu" --version
+      - name: Test Windows PowerShell 5 and 7 install and upgrade
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:ZHANDU_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'zhandu-live-install'
+          ./install.ps1
+          $binary = Join-Path $env:ZHANDU_INSTALL_DIR 'zhandu.exe'
+          ./scripts/test_install_ps1.ps1 -Binary $binary
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell live install failed' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test_install_ps1.ps1 -Binary $binary
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell installer tests failed' }
