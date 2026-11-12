@@ -1,13 +1,13 @@
-**zhandu v0.6.0** makes owner-filtered browsing more consistent and adds display controls, safer refresh recovery, and a short terminal demo.
+**zhandu v0.6.1** adds human-readable sizes to JSON output, addressing [#1](https://github.com/zhanxw/zhandu/issues/1).
 
-- Start with two panels. `v` switches between one and two panels; `d` toggles files without changing layout. Left/Backspace goes to the parent directory; Tab switches panel focus.
-- Press `p` to show/hide percentages in both panels. Percentages follow the current size mode and filtered totals.
-- Highlight sizes ≥1 GiB in yellow and ≥100 GiB in bold red. Shift+C toggles size colors.
-- Press `q` in help, error, or details panels to close the panel; `q` in the browser exits.
-- Press `r` for background refresh while retaining navigation and filters; revalidate file marks before enabling deletion again.
-- Press `z` to hide known zero usage and `i` for entry details. Keep marks, cache age, and branch completeness visible.
-- Preserve partial caches alongside complete snapshots and recover safely when selected paths or scan roots change.
-- Add a 13-second terminal demo to the README.
+```sh
+zhandu PATH --json --human-readable
+```
+
+- Include `allocated_human` and `apparent_human` strings in totals, directory self-usage, user/group totals, and child entries.
+- Use binary units such as `1.0 KiB`, `234.0 MiB`, and `2.0 GiB`, matching the TUI.
+- Retain exact numeric byte and inode counts. Default JSON output, filters, and sorting remain unchanged.
+- Require `--json` when using `--human-readable`.
 
 Install/update with `cargo install zhandu --locked` (Rust 1.89 or newer).
 
