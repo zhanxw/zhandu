@@ -100,3 +100,76 @@ fn windows_display_escapes_control_characters_and_unpaired_surrogates() {
     let rendered = zhandu::model::display_name(&name);
     assert_eq!(rendered, "a\\u{d800}\\u{1b}z");
 }
+
+#[test]
+fn json_human_readable_adds_sizes_without_changing_numeric_report() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("data"), [1u8; 8192]).unwrap();
+    fs::write(dir.path().join("empty"), []).unwrap();
+    fs::create_dir(dir.path().join("nested")).unwrap();
+    fs::write(dir.path().join("nested/child"), [2u8; 1024]).unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_zhandu"))
+            .arg(dir.path())
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    fn check_and_strip(value: &mut serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(fields) => {
+                let mut count = 0;
+                if let Some(bytes) = fields.get("allocated").and_then(|v| v.as_u64()) {
+                    assert_eq!(
+                        fields.remove("allocated_human").unwrap(),
+                        zhandu::model::human(bytes)
+                    );
+                    let bytes = fields["apparent"].as_u64().unwrap();
+                    assert_eq!(
+                        fields.remove("apparent_human").unwrap(),
+                        zhandu::model::human(bytes)
+                    );
+                    assert!(fields["inodes"].is_u64());
+                    count += 1;
+                }
+                count + fields.values_mut().map(check_and_strip).sum::<usize>()
+            }
+            serde_json::Value::Array(rows) => rows.iter_mut().map(check_and_strip).sum(),
+            _ => 0,
+        }
+    }
+    let first = run(&[]);
+    let owner = &first["users"][0];
+    let identity = owner["sid"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| owner["id"].as_u64().unwrap().to_string());
+    for args in [vec![], vec!["--apparent-size"], vec!["--user", &identity]] {
+        let mut plain = run(&args);
+        assert!(!plain.to_string().contains("_human"));
+        let mut formatted_args = args.clone();
+        formatted_args.push("--human-readable");
+        let mut formatted = run(&formatted_args);
+        let expected = 2
+            + formatted["groups"].as_array().unwrap().len()
+            + formatted["users"].as_array().unwrap().len()
+            + formatted["children"].as_array().unwrap().len();
+        assert_eq!(check_and_strip(&mut formatted), expected);
+        plain.as_object_mut().unwrap().remove("elapsed_seconds");
+        formatted.as_object_mut().unwrap().remove("elapsed_seconds");
+        assert_eq!(formatted, plain);
+    }
+    let invalid = Command::new(env!("CARGO_BIN_EXE_zhandu"))
+        .arg("--human-readable")
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("--json"));
+}

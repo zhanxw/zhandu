@@ -39,6 +39,9 @@ For a local source build, the executable is `target/release/zhandu` (`target/rel
 
 # Noninteractive, machine-readable totals
 ./target/release/zhandu /shared/project --json
+
+# Include readable sizes alongside exact byte counts
+./target/release/zhandu /shared/project --json --human-readable
 ```
 
 Use the binary's absolute path from another directory to scan that directory, or install it on your PATH with `cargo install --path . --locked` from this project. No global installation was performed during development.
@@ -159,6 +162,21 @@ Both panels use the current path. Switching layout or reopening the owner select
 ## JSON and exit codes
 
 `--json` emits schema version 1 with both allocated and apparent bytes, unique inode counts, per-group/per-user totals, immediate child summaries, directory self-usage, active filters, elapsed time, and completeness/errors. `--apparent-size` changes sorting; both byte measures remain in JSON. Unix ownership records use numeric IDs. Windows records additionally contain a persistent `sid` string; their numeric `id` values are process-local intern keys and must not be compared across runs. Windows command-line filters accept account names (for example `DOMAIN\user`) or SID strings (`S-1-...`), rather than Unix-style numeric IDs. Names and paths are escaped display strings; do not treat them as unescaped filesystem paths. The export is a summary, not a persistent scan cache.
+
+Add `--human-readable` to `--json` to include `allocated_human` and `apparent_human` in every usage object: totals, directory self-usage, users, groups, and children. These strings use powers of 1024 (KiB, MiB, GiB, etc.) with one decimal place, matching the TUI. Exact numeric byte counts and inode counts remain available; the default JSON is unchanged. For example:
+
+```json
+{
+  "allocated": 1048576,
+  "apparent": 1073741824,
+  "inodes": 1,
+  "allocated_human": "1.0 MiB",
+  "apparent_human": "1.0 GiB"
+}
+```
+
+`--human-readable` requires `--json`. It changes presentation only, including when combined with owner filters or `--apparent-size`.
+
 
 | Code | Meaning |
 | --- | --- |

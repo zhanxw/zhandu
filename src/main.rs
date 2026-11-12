@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
 };
 use zhandu::{
-    model::{Filter, Tree, Usage, display_name},
+    model::{Filter, Tree, Usage, display_name, human},
     scan::{Progress, ScanOptions, scan},
     ui,
 };
@@ -54,6 +54,9 @@ struct Args {
     /// Print JSON summary, owner totals, and immediate children, without TUI
     #[arg(long)]
     json: bool,
+    /// Add formatted sizes (KiB, MiB, GiB, etc.) to JSON, retaining exact byte counts
+    #[arg(long, requires = "json")]
+    human_readable: bool,
     /// Display Unix IDs / Windows SIDs without account-name lookups
     #[arg(long)]
     numeric_ids: bool,
@@ -71,19 +74,44 @@ fn resolve(value: Option<&str>, group: bool) -> Result<Option<u32>, String> {
         .transpose()
 }
 
+/// Optional display fields keep the default JSON and numeric accounting unchanged.
+#[derive(Serialize)]
+struct JsonUsage {
+    #[serde(flatten)]
+    raw: Usage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allocated_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apparent_human: Option<String>,
+}
+
+impl JsonUsage {
+    fn new(raw: Usage, human_readable: bool) -> Self {
+        Self {
+            raw,
+            allocated_human: human_readable.then(|| human(raw.allocated)),
+            apparent_human: human_readable.then(|| human(raw.apparent)),
+        }
+    }
+
+    fn bytes(&self, apparent: bool) -> u64 {
+        self.raw.bytes(apparent)
+    }
+}
+
 #[derive(Serialize)]
 struct OwnerRow {
     id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     sid: Option<String>,
-    usage: Usage,
+    usage: JsonUsage,
 }
 #[derive(Serialize)]
 struct ChildRow {
     name: String,
     is_directory: bool,
     shared_link: bool,
-    usage: Usage,
+    usage: JsonUsage,
 }
 #[derive(Serialize)]
 struct Report {
@@ -94,8 +122,8 @@ struct Report {
     entries: usize,
     filter_uid: Option<u32>,
     filter_gid: Option<u32>,
-    total: Usage,
-    directory_self: Usage,
+    total: JsonUsage,
+    directory_self: JsonUsage,
     groups: Vec<OwnerRow>,
     users: Vec<OwnerRow>,
     children: Vec<ChildRow>,
@@ -103,7 +131,7 @@ struct Report {
     errors: Vec<String>,
 }
 
-fn report(tree: &Tree, filter: Filter, apparent: bool) -> Report {
+fn report(tree: &Tree, filter: Filter, apparent: bool, human_readable: bool) -> Report {
     let owners = |by_group| {
         let mut rows: Vec<_> = tree
             .ownership(0, by_group, filter)
@@ -111,7 +139,7 @@ fn report(tree: &Tree, filter: Filter, apparent: bool) -> Report {
             .map(|(id, usage)| OwnerRow {
                 id,
                 sid: zhandu::platform::owner_identifier(id),
-                usage,
+                usage: JsonUsage::new(usage, human_readable),
             })
             .collect();
         rows.sort_by(|a, b| {
@@ -131,10 +159,10 @@ fn report(tree: &Tree, filter: Filter, apparent: bool) -> Report {
                 name: display_name(&node.name),
                 is_directory: node.is_dir,
                 shared_link: node.shared_link,
-                usage: node.usage(filter),
+                usage: JsonUsage::new(node.usage(filter), human_readable),
             }
         })
-        .filter(|row| filter.is_empty() || row.usage.inodes > 0)
+        .filter(|row| filter.is_empty() || row.usage.raw.inodes > 0)
         .collect();
     children.sort_by(|a, b| {
         b.usage
@@ -151,12 +179,15 @@ fn report(tree: &Tree, filter: Filter, apparent: bool) -> Report {
         entries: tree.nodes.len(),
         filter_uid: filter.uid,
         filter_gid: filter.gid,
-        total: root.usage(filter),
-        directory_self: if filter.matches(root.uid, root.gid) {
-            root.own
-        } else {
-            Usage::default()
-        },
+        total: JsonUsage::new(root.usage(filter), human_readable),
+        directory_self: JsonUsage::new(
+            if filter.matches(root.uid, root.gid) {
+                root.own
+            } else {
+                Usage::default()
+            },
+            human_readable,
+        ),
         groups: owners(true),
         users: owners(false),
         children,
@@ -192,7 +223,10 @@ fn run(args: Args) -> Result<i32, Box<dyn std::error::Error>> {
             return Ok(130);
         }
         let mut output = io::BufWriter::new(io::stdout().lock());
-        serde_json::to_writer_pretty(&mut output, &report(&tree, filter, args.apparent_size))?;
+        serde_json::to_writer_pretty(
+            &mut output,
+            &report(&tree, filter, args.apparent_size, args.human_readable),
+        )?;
         writeln!(output)?;
         output.flush()?;
         Ok(if tree.error_count == 0 { 0 } else { 2 })
@@ -236,6 +270,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn json_size_labels_cover_zero_unit_boundaries_and_large_values() {
+        for (bytes, label) in [
+            (0, "0.0 B"),
+            (1023, "1023.0 B"),
+            (1024, "1.0 KiB"),
+            (1 << 20, "1.0 MiB"),
+            (1 << 30, "1.0 GiB"),
+            (1 << 40, "1.0 TiB"),
+            (u64::MAX, "16.0 EiB"),
+        ] {
+            let usage = Usage {
+                allocated: bytes,
+                apparent: bytes,
+                inodes: 1,
+            };
+            let output = serde_json::to_value(JsonUsage::new(usage, true)).unwrap();
+            assert_eq!(output["allocated"].as_u64(), Some(bytes));
+            assert_eq!(output["allocated_human"], label);
+            assert_eq!(output["apparent_human"], label);
+        }
+    }
+
     #[test]
     fn default_is_two_panels_and_legacy_single_startup_is_explicit() {
         assert!(matches!(Args::parse_from(["zhandu"]).view, View::Users));
