@@ -44,7 +44,8 @@
         $staged = Join-Path $installDir ([guid]::NewGuid().ToString() + '.exe')
         Copy-Item -LiteralPath $binary -Destination $staged
         if (Test-Path -LiteralPath $destination) {
-            [IO.File]::Replace($staged, $destination, $null)
+            # PowerShell converts $null to an empty string for this .NET string argument.
+            [IO.File]::Replace($staged, $destination, [NullString]::Value)
         } else {
             [IO.File]::Move($staged, $destination)
         }
